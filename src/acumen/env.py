@@ -109,12 +109,33 @@ def cache_key(repo: str, ref: str) -> str:
     return f"{stem}-{digest}"
 
 
-def _clone(repo: str, ref: str, dest: Path) -> None:
+def _clone(repo: str, ref: str, dest: Path, *, submodules: bool = True) -> None:
+    """Clone ``repo`` at ``ref`` into ``dest``, optionally checking out its submodules.
+
+    Submodules are initialised *after* the ref checkout, so each one lands on the commit
+    that ref pins rather than whatever the default branch points at.
+
+    A package's tutorials are routinely a submodule, and the drafting and task-generation
+    agents read those docs as their primary evidence. Skipping them leaves an empty
+    directory that an agent cannot distinguish from a package with no tutorials, so a
+    submodule that is declared but cannot be fetched is a hard error rather than a silent
+    gap — set ``submodules: false`` in ``config.yaml`` to opt out deliberately.
+    """
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     _run(["git", "clone", "--filter=blob:none", "--quiet", repo, str(dest)])
     _run(["git", "-c", "advice.detachedHead=false", "checkout", "--quiet", ref], cwd=dest)
+    if not submodules or not (dest / ".gitmodules").is_file():
+        return
+    try:
+        _run(["git", "submodule", "update", "--init", "--recursive", "--quiet"], cwd=dest)
+    except EnvError as err:
+        raise EnvError(
+            f"{repo}@{ref} declares submodules that could not be checked out: {err}\n"
+            "The docs an agent reads may live in one of them. Fix access to the submodule, "
+            "or set 'submodules: false' in config.yaml to proceed without them."
+        ) from err
 
 
 def _resolve_commit(src_dir: Path) -> str:
@@ -152,9 +173,12 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
     Parameters
     ----------
     cfg
-        The pass config; supplies ``repo``, ``ref``, ``extras`` and ``python``.
+        The pass config; supplies ``repo``, ``ref``, ``extras``, ``python`` and
+        ``submodules``.
     cache_root
-        Directory to hold checkouts and venvs, keyed by (repo, ref).
+        Directory to hold checkouts and venvs, keyed by (repo, ref). ``submodules`` is
+        recorded in the ready marker rather than folded into the key, so flipping it
+        rebuilds the entry in place instead of stranding the old one.
     refresh
         Rebuild even if a ready-marked cache entry exists.
 
@@ -191,11 +215,15 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
             target = None  # a corrupt marker just means we rebuild
         else:
             # A local target's working tree can move under us; a clone at a pinned ref cannot.
-            if target.python.is_file() and (not cfg.is_local or _resolve_commit(src_dir) == target.commit):
+            # `submodules` is part of what the checkout *is*, so a cache entry built under a
+            # different setting is stale — otherwise flipping it on would silently keep
+            # serving the submodule-less tree it was first built with.
+            fresh = cached.get("submodules") == cfg.submodules
+            if fresh and target.python.is_file() and (not cfg.is_local or _resolve_commit(src_dir) == target.commit):
                 return target
 
     if not cfg.is_local:
-        _clone(cfg.repo, cfg.ref, src_dir)
+        _clone(cfg.repo, cfg.ref, src_dir, submodules=cfg.submodules)
 
     entry.mkdir(parents=True, exist_ok=True)
     if venv_dir.exists():
@@ -225,6 +253,7 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
                 "commit": target.commit,
                 "pkg_name": target.pkg_name,
                 "pkg_version": target.pkg_version,
+                "submodules": cfg.submodules,
             },
             indent=2,
         )

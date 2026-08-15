@@ -106,5 +106,35 @@ Traps identified:
 - A continuous unattended loop deliberately inverts the shipped skill's "never chain commands
   unattended" stance, making stopping rules and hard budget caps load-bearing.
 
-**Open fork.** Whether the rulebook is squidpy-specific or meant to generalize across
-packages — this decides whether the outer CV partitions tasks or packages. Asked; pending.
+**Decisions.** Rulebook is **squidpy-specific** (CV partitions squidpy tasks, not packages).
+Budget: **assume infinite tokens** — so wall-clock, not dollars, is the binding constraint
+(~2,700 runs/iteration at `max_concurrency: 4` is ~30h, and squidpy's permutation-heavy
+analyses are CPU-bound locally). Infinite budget also makes selection leakage *worse*, since
+many more iterations degrade the held-out set faster — the lockbox is now essential, and
+dataset caching plus concurrency move up the build order.
+
+**Build order agreed.** P0 clone submodules → P1 sharded task generation → P2 coverage
+measurement → P3 warm dataset cache → P4 difficulty strata → P5 CV axis + lockbox →
+P6 rulebook artifact → P7 the loop.
+
+---
+
+## 2026-08-15 — P0: check out target submodules
+
+**Task.** Make squidpy's tutorials visible to the drafting and task-generation agents.
+
+**Approach.** Added a `submodules: bool = True` config key and made `env.py:_clone` run
+`git submodule update --init --recursive` *after* the ref checkout, so submodules land on the
+commit the ref pins. A declared-but-unfetchable submodule raises `EnvError` naming the opt-out
+rather than leaving an empty directory — an agent cannot tell that apart from "this package
+has no tutorials", which is the exact silent failure being fixed. `submodules` is recorded in
+the cache ready-marker and a mismatch forces a rebuild, so flipping it cannot keep serving the
+submodule-less tree it was first built with.
+
+**Result.** Verified against real squidpy: **50 notebooks** now checked out under
+`docs/notebooks` (20 tutorials, 29 examples, 1 deprecated) where the previous code produced 0.
+Three tests added (default + validation, command order and opt-out, hard failure on an
+unfetchable submodule); full suite 111 passed, ruff clean.
+
+Note for existing users: cached targets built before this change are invalidated by the
+marker check and will re-clone on next use.

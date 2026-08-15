@@ -26,6 +26,7 @@ from acumen.env import (
     AUTH_ENV_VARS,
     EnvError,
     Target,
+    _clone,
     api_auth_available,
     auth_available,
     build_agent_env,
@@ -125,6 +126,61 @@ def test_config_defaults_and_derived_skill_name() -> None:
 
     cfg2 = parse_config({"repo": "https://github.com/scverse/scanpy", "env_passthrough": ["OMP_NUM_THREADS"]})
     assert cfg2.env_passthrough == ["OMP_NUM_THREADS"]
+
+
+def test_config_submodules_defaults_on_and_must_be_a_bool() -> None:
+    assert parse_config({"repo": "https://github.com/scverse/squidpy"}).submodules is True
+    assert parse_config({"repo": "https://github.com/scverse/squidpy", "submodules": False}).submodules is False
+    with pytest.raises(ConfigError, match="must be true or false"):
+        parse_config({"repo": "https://github.com/scverse/squidpy", "submodules": "yes"})
+
+
+def test_clone_checks_out_submodules_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The real work is a network clone, so assert on the git commands issued: a declared
+    # submodule must be initialised after the ref checkout, and skipped when opted out.
+    calls: list[list[str]] = []
+    dest = tmp_path / "src"
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> str:
+        calls.append(cmd)
+        if cmd[:2] == ["git", "clone"]:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".gitmodules").write_text('[submodule "docs/notebooks"]\n')
+        return ""
+
+    monkeypatch.setattr("acumen.env._run", fake_run)
+
+    _clone("https://example.com/pkg", "main", dest)
+    assert [c for c in calls if c[:2] == ["git", "submodule"]] == [
+        ["git", "submodule", "update", "--init", "--recursive", "--quiet"]
+    ]
+    # ...and it runs after the checkout, so submodules land on the commit the ref pins.
+    assert calls.index(["git", "submodule", "update", "--init", "--recursive", "--quiet"]) > next(
+        i for i, c in enumerate(calls) if "checkout" in c
+    )
+
+    calls.clear()
+    _clone("https://example.com/pkg", "main", dest, submodules=False)
+    assert not [c for c in calls if c[:2] == ["git", "submodule"]]
+
+
+def test_clone_reports_a_submodule_that_cannot_be_checked_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A declared-but-unfetchable submodule leaves an empty directory an agent would read as
+    # "this package has no tutorials", so it must fail loudly rather than silently.
+    dest = tmp_path / "src"
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> str:
+        if cmd[:2] == ["git", "clone"]:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".gitmodules").write_text('[submodule "docs/notebooks"]\n')
+        if cmd[:2] == ["git", "submodule"]:
+            raise EnvError("fatal: could not read Username")
+        return ""
+
+    monkeypatch.setattr("acumen.env._run", fake_run)
+
+    with pytest.raises(EnvError, match="submodules: false"):
+        _clone("https://example.com/pkg", "main", dest)
 
 
 def test_config_rejects_unknown_keys() -> None:

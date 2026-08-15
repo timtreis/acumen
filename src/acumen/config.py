@@ -24,6 +24,13 @@ class Config:
     ref: str = "main"
     extras: list[str] = field(default_factory=list)
     python: str = "3.12"
+    #: Whether to check out the target's git submodules after cloning. Defaults to True
+    #: because a package's tutorials are routinely a submodule (squidpy keeps its 50
+    #: notebooks in ``docs/notebooks`` -> ``scverse/squidpy-tutorials``), and the drafting
+    #: and task-generation agents read those docs as their primary evidence — without them
+    #: the agent silently sees an empty directory and falls back to guessing from source.
+    #: Set False for a target whose submodules are private, huge, or irrelevant.
+    submodules: bool = True
     #: Names of environment variables to carry from the operator's shell into isolated
     #: agents (bench sandboxes and the draft/improve/tasks meta-agents), on top of the
     #: built-in auth/proxy allowlist. The agent env is otherwise a clean allowlist — every
@@ -56,6 +63,7 @@ _KNOWN = {
     "ref",
     "extras",
     "python",
+    "submodules",
     "env_passthrough",
     "models",
     "n_replicates",
@@ -120,6 +128,15 @@ def _positive_float(raw: dict[str, Any], key: str, default: float) -> float:
     return float(value)
 
 
+def _bool(raw: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ConfigError(f"'{key}' must be true or false, got {value!r}")
+    return value
+
+
 def _str_list(raw: dict[str, Any], key: str, default: list[str]) -> list[str]:
     if key not in raw:
         return list(default)
@@ -165,6 +182,7 @@ def parse_config(raw: Any) -> Config:
         ref=_optional_str(raw, "ref", "main"),
         extras=_str_list(raw, "extras", []),
         python=_optional_str(raw, "python", "3.12"),
+        submodules=_bool(raw, "submodules", True),
         env_passthrough=_str_list(raw, "env_passthrough", []),
         models=models,
         n_replicates=_positive_int(raw, "n_replicates", 3),
