@@ -59,3 +59,52 @@ harness and fan out one agent per shard behind the existing `asyncio.Semaphore` 
 writing its own validated shard file (per-shard failure, free resume, structural dedup); ask
 for k tasks per shard off one prepared object; a shared warm dataset cache; and a merge step
 plus optional cheap baseline screening.
+
+---
+
+## 2026-08-15 — Target design: continuous rulebook autoresearch loop
+
+**Task.** Establish what the larger task pool is for, and what it implies. Goal: a continuous
+loop that optimizes a *rulebook/codebook* for generating `SKILL.md`, scored on a clean
+held-out task set, ideally under cross-validation and stratified by task difficulty, with
+tasks exhaustively covering the package so the resulting skill is maximally useful yet lean.
+
+**Approach.** Mapped the goal onto the current architecture; identified which pieces exist,
+which are new axes, and where the design would silently fail.
+
+**Result.** This is a two-level optimization — acumen today has only the inner level (skill
+drafted → benched → improved). The rulebook becomes the optimized artifact and skills become
+intermediates, so `DRAFT_PROMPT`/`IMPROVE_PROMPT` must become versioned, content-hashed
+`rulebooks/vN/` mirroring `skills.py`.
+
+Missing, in dependency order:
+1. Coverage-driven task generation at volume (prerequisite for all of it).
+2. A difficulty signal — none exists; the only honest source is baseline pass rate, so a
+   screening bench becomes mandatory. Difficulty is model-dependent, so the reference model
+   must be fixed and recorded.
+3. CV over tasks — a genuinely new axis. Today's `train`/`test` is *within-task variants*
+   (`tasks.py:27`), not a task partition; the two are orthogonal and both are wanted.
+   `SPLITS` is a hardcoded path component (`paths.py:17`); `collect_train_runs`
+   (`improve.py:137`) has no task filter; the isolation hook blocks `runs/*/test/` only.
+4. Coverage as a *measured* quantity. Denominator: squidpy documents 68 public symbols
+   (34 `gr`, 15 `datasets`, 10 `pl`, 4 `im`, 3 `read`, 2 `tl`) → ~43 analysis-bearing after
+   dropping datasets and plotting. Proposal: instrument the ground-truth `script.py`
+   execution to record which symbols were actually called — verified coverage, and uncovered
+   symbols become the generation queue. Same "evidence not assumption" pattern as
+   `skill_loaded`.
+
+Traps identified:
+- **Selection leakage.** Scoring rulebook v1..vN against the same folds turns held-out into
+  training-by-selection. Needs nested CV or a structurally unreadable lockbox.
+- **Cost.** ~150 tasks × 5 folds at the scaffolded config ≈ 2,700 runs/iteration (~$540).
+  Tractable form: cheap inner loop (1 model, 1 rep, held-out only ≈ 150 runs, ~$30) plus rare
+  full-config confirmation. Eval config must become a first-class knob.
+- **Dataset re-download** moves from inefficiency to blocker at this run count; a warm shared
+  cache is required without loosening the env scrub.
+- "Lean" is unmeasured — no skill-size metric exists; it needs a Pareto axis against success
+  rate (frontier machinery exists at `report.py:593,631`, currently cost vs success).
+- A continuous unattended loop deliberately inverts the shipped skill's "never chain commands
+  unattended" stance, making stopping rules and hard budget caps load-bearing.
+
+**Open fork.** Whether the rulebook is squidpy-specific or meant to generalize across
+packages — this decides whether the outer CV partitions tasks or packages. Asked; pending.
