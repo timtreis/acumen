@@ -10,9 +10,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from acumen.bench import build_matrix, pending, run_matrix, summarize
-from acumen.config import ConfigError, load_config
+from acumen.config import Config, ConfigError, load_config
 from acumen.draft import DraftError, draft_skill
-from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, prepare_target, resolve_auth_mode
+from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
 from acumen.paths import SPLITS
@@ -21,7 +21,7 @@ from acumen.runner import RunOutcome, StderrFilter
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
 from acumen.skills import SkillError, available_versions, latest_version, load_skill
-from acumen.taskgen import TaskGenError, generate_tasks
+from acumen.taskgen import ShardOutcome, TaskGenError, generate_tasks, generate_tasks_sharded
 from acumen.tasks import TaskError, load_tasks
 
 
@@ -374,6 +374,10 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+
+    if args.per_notebook:
+        return _cmd_tasks_sharded(args, cfg, target, out, auth_mode)
+
     print(
         f"generating tasks with {cfg.tasks_model} (this reads the source and runs package code) ...",
         flush=True,
@@ -399,6 +403,51 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
     print(f"  tasks: {len(result.tasks)} ({', '.join(t.id for t in result.tasks)})")
     print(f"  cost:  ${result.cost_usd:.2f} over {result.turns} turns")
     _print_log_result(log)
+    print("\nnext: review the tasks, then `acumen draft` and `acumen bench`")
+    return 0
+
+
+def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, out: Path, auth_mode: AuthMode) -> int:
+    """Run per-notebook (sharded) task generation, streaming per-shard progress to the terminal."""
+    shards_dir = args.shards_dir or out.parent / f"{out.stem}.shards"
+    print(
+        f"generating tasks per notebook with {cfg.tasks_model}, up to {cfg.max_concurrency} at once "
+        f"(each reads its notebook and runs package code) ...",
+        flush=True,
+    )
+    print(f"shards → {shards_dir}   logs → {args.log_dir}", flush=True)
+
+    def on_done(outcome: ShardOutcome) -> None:
+        if outcome.status == "cached":
+            mark, detail = "·", f"cached, {outcome.n_tasks} tasks"
+        elif outcome.status == "generated":
+            mark, detail = "✓", f"{outcome.n_tasks} tasks, ${outcome.cost_usd:.2f}"
+        else:
+            mark, detail = "✗", f"FAILED — {outcome.error}"
+        print(f"  {mark} {outcome.slug}: {detail}", flush=True)
+
+    result = asyncio.run(
+        generate_tasks_sharded(
+            cfg=cfg,
+            target=target,
+            out_path=out,
+            shards_dir=shards_dir,
+            auth_mode=auth_mode,
+            max_turns=args.max_turns,
+            max_usd=args.max_usd,
+            force=args.force,
+            feedback=args.feedback,
+            log_dir=args.log_dir,
+            stream=args.stream,
+            on_shard_done=on_done,
+        )
+    )
+    print(f"\nwrote {result.out_path.resolve()}")
+    print(f"  tasks:  {len(result.tasks)} from {result.n_ok}/{len(result.outcomes)} shards")
+    if result.n_failed:
+        failed = ", ".join(o.slug for o in result.outcomes if o.status == "failed")
+        print(f"  failed: {result.n_failed} shards ({failed}) — rerun to retry them", file=sys.stderr)
+    print(f"  cost:   ${result.cost_usd:.2f}")
     print("\nnext: review the tasks, then `acumen draft` and `acumen bench`")
     return 0
 
@@ -551,6 +600,19 @@ def build_parser() -> argparse.ArgumentParser:
     tasks_cmd.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
     tasks_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     tasks_cmd.add_argument("--force", action="store_true", help="overwrite an existing tasks file")
+    tasks_cmd.add_argument(
+        "--per-notebook",
+        action="store_true",
+        help="shard generation: run one agent per tutorial notebook, resumable, merged at the end "
+        "(scales to exhaustive coverage instead of one agent covering the whole package)",
+    )
+    tasks_cmd.add_argument(
+        "--shards-dir",
+        type=Path,
+        default=None,
+        help="where per-notebook shard files live (default: <out>.shards next to --out); "
+        "delete a shard file to regenerate just that notebook",
+    )
     _add_auth_arg(tasks_cmd)
     _add_feedback_arg(tasks_cmd, extra=" (e.g. which functionality to skip or focus on)")
     _add_log_args(tasks_cmd)

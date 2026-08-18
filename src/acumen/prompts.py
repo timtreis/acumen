@@ -299,15 +299,7 @@ been stripped from the source above, and any attempt to reach them — or the or
 unfiltered checkout — is BLOCKED. This is on purpose: reading pre-written guidance would bias
 which analyses you pick and how you phrase them, and this benchmark must be independent of it.
 
-# Cover every tutorial — enumerate them FIRST
-
-Before writing anything, find EVERY tutorial / vignette / worked example the package publishes:
-its documentation gallery, an `examples/`, `tutorials/`, or `docs/` directory, notebooks,
-README walkthroughs. List them all. You will write AT LEAST ONE task per tutorial — do not stop
-after a handful, and do not cover only the easy ones. A published tutorial is a real analysis
-someone thought worth doing; that is exactly the unit of work this benchmark should measure.
-Only if the package has genuinely no tutorials should you infer analyses from its source.
-
+{scope}
 # How to write a task — like a lazy human, not a manual
 
 Each task's prompt is ONE short paragraph of ordinary English: the GOAL a user wants, and
@@ -383,9 +375,47 @@ want a per-task override (`max_turns`, `max_usd`, or `model` are the only ones a
   from docs.
 - Every prompt is ONE paragraph: a goal in plain English, with no steps, no code, no package
   name, no version, no data description — only the goal and a precise statement of the output.
-- You wrote at least one task per tutorial, and covered all of them.
+{coverage_check}
 - `{out}` exists and parses as the YAML above with at least one task.
 """
+
+
+#: The whole-package scope block: enumerate and cover EVERY tutorial in one context. Filled into
+#: ``{scope}`` by :func:`taskgen_prompt` — the single-agent generator that sees the whole package.
+TASKGEN_SCOPE_WHOLE = """\
+# Cover every tutorial — enumerate them FIRST
+
+Before writing anything, find EVERY tutorial / vignette / worked example the package publishes:
+its documentation gallery, an `examples/`, `tutorials/`, or `docs/` directory, notebooks,
+README walkthroughs. List them all. You will write AT LEAST ONE task per tutorial — do not stop
+after a handful, and do not cover only the easy ones. A published tutorial is a real analysis
+someone thought worth doing; that is exactly the unit of work this benchmark should measure.
+Only if the package has genuinely no tutorials should you infer analyses from its source.
+"""
+
+#: The per-notebook scope block: cover ONE assigned tutorial. Filled into ``{scope}`` by
+#: :func:`taskgen_shard_prompt` — one such agent runs per notebook, fanned out by the harness, so
+#: coverage of the whole package is the union of the shards rather than one agent's stamina. The
+#: ``{notebook}`` placeholder is the notebook's path within the source copy.
+TASKGEN_SCOPE_SHARD = """\
+# Your one tutorial — cover the analyses in it
+
+You are generating tasks for exactly ONE tutorial from this package: `{notebook}`. Read it in
+full, and the source it exercises, and write a task for each genuinely DIFFERENT analysis it
+demonstrates — usually one to three. Do NOT wander into other tutorials or unrelated parts of the
+API; other agents cover those, and overlap wastes the benchmark. If the notebook demonstrates a
+single analysis, ONE well-formed task is the correct output — do not pad it to hit a count.
+"""
+
+#: The whole-package "before you finish" coverage bullet, paired with :data:`TASKGEN_SCOPE_WHOLE`.
+TASKGEN_CHECK_WHOLE = "- You wrote at least one task per tutorial, and covered all of them."
+
+#: The per-notebook coverage bullet, paired with :data:`TASKGEN_SCOPE_SHARD`. ``{notebook}`` is
+#: the assigned notebook's path.
+TASKGEN_CHECK_SHARD = (
+    "- Every task is grounded in an analysis actually demonstrated in `{notebook}` — you did not\n"
+    "  wander into other tutorials."
+)
 
 
 #: Canonical ``install.py`` the shipping agent adapts. The single placeholder is
@@ -860,6 +890,53 @@ def taskgen_prompt(*, package: str, src: Path, python: Path, out: Path, feedback
         python=python,
         out=out,
         out_dir=out.parent,
+        scope=TASKGEN_SCOPE_WHOLE,
+        coverage_check=TASKGEN_CHECK_WHOLE,
+        feedback=feedback_block(feedback),
+    )
+
+
+def taskgen_shard_prompt(
+    *, package: str, src: Path, python: Path, out: Path, notebook: str, feedback: str | None = None
+) -> str:
+    """Build the prompt for one *sharded* task-generation agent — a single assigned notebook.
+
+    Identical to :func:`taskgen_prompt` except for the scope: instead of enumerating and covering
+    every tutorial in one context (which serializes the whole package into one agent's stamina and
+    loses everything on a single error), this agent covers exactly one notebook. The harness fans
+    out one such agent per notebook, so whole-package coverage is the union of the shards. The
+    task-writing rules, the ground-truth-by-execution discipline, and the output schema are shared
+    with :func:`taskgen_prompt` verbatim — only the ``{scope}`` and ``{coverage_check}`` sections
+    differ — so the two generators cannot drift on what a well-formed task looks like.
+
+    Parameters
+    ----------
+    package
+        The target package name, for the agent's orientation only.
+    src
+        The (filtered) package checkout, readable by this agent only.
+    python
+        The interpreter with the package installed, used to run pipelines for ground truth.
+    out
+        The shard's ``tasks.yaml`` file the agent writes into its working directory.
+    notebook
+        Path (within ``src``) of the one notebook this shard covers.
+    feedback
+        Optional maintainer guidance, subordinated below the hard rules. ``None`` leaves the
+        prompt byte-identical to a run without the flag.
+
+    Returns
+    -------
+    The per-notebook task-generation prompt.
+    """
+    return TASKGEN_PROMPT.format(
+        package=package,
+        src=src,
+        python=python,
+        out=out,
+        out_dir=out.parent,
+        scope=TASKGEN_SCOPE_SHARD.format(notebook=notebook),
+        coverage_check=TASKGEN_CHECK_SHARD.format(notebook=notebook),
         feedback=feedback_block(feedback),
     )
 

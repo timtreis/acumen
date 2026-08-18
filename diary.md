@@ -138,3 +138,47 @@ unfetchable submodule); full suite 111 passed, ruff clean.
 
 Note for existing users: cached targets built before this change are invalidated by the
 marker check and will re-clone on next use.
+
+---
+
+## 2026-08-18 — P1: sharded task generation (one agent per notebook)
+
+**Task.** Break the single-context task generator into one agent per notebook, so coverage is
+the union of many small agents instead of one agent's stamina — with per-shard failure
+isolation, free resume, and a validated merge. **Decision:** shard = notebook (50 shards, option
+A). B's only advantage was download cost, which the committed P3 warm cache retires regardless of
+shard key; A keeps the natural analysis boundary, small per-shard context, and the clean
+per-notebook mapping the taskgen prompt is already built around.
+
+**Approach.** Enumerate notebooks *in the harness* (`notebook_shards`: `rglob("*.ipynb")` minus
+checkpoint copies), not inside an agent, so fan-out/resume/merge are code-driven. Extracted the
+isolation-critical agent core (`_run_generation_agent` — scrubbed env, skill-bias guard, filtered
+`add_dirs`, query loop) so the whole-package and per-notebook paths share exactly one copy of the
+security-sensitive part and can't drift; the whole-package `generate_tasks` now calls it too.
+`generate_tasks_sharded` builds **one** read-only filtered source copy shared across all shards
+(isolation is one `copytree`, not 50), then fans out `taskgen_shard_prompt` agents under a
+semaphore. Each writes its own validated `shards_dir/<slug>.yaml`; a shard that raises is recorded
+`failed` and skipped rather than taking the pass down (mirrors `run_matrix`); a shard whose file
+already parses is reused (resume by file presence, like the runner's `result.json`). `merge_shards`
+namespaces every task id by shard slug (`<slug>__<id>`) so the union is unique and traceable, then
+round-trips through the strict loader before writing `tasks.yaml`.
+
+The prompt stays one template: `TASKGEN_PROMPT` grew a `{scope}` + `{coverage_check}` seam, and
+`taskgen_shard_prompt` fills the per-notebook scope while `taskgen_prompt` fills the whole-package
+one — so the task-writing rules (ground-truth-by-execution, output schema, train/test variants)
+have a single source of truth and only the coverage scope differs. CLI: `acumen tasks
+--per-notebook [--shards-dir DIR]`, default off (non-breaking; the whole-package path is unchanged
+and the P7 loop will call the API directly). `force` governs only `out_path`; regenerating a shard
+means deleting its file — the deliberate, inspectable knob.
+
+**Result.** New `tests/test_taskgen.py` (11 tests) covers the pure seams (enumeration/checkpoint
+skip, slug disambiguation of same-named notebooks in different galleries, id namespacing, merge
+uniqueness) and the fan-out with `_run_generation_agent` monkeypatched — merge-all, failed-shard
+isolation, cached-shard resume (agent never invoked), no-notebooks and existing-out errors, and
+that each shard is handed its own notebook (guards the closure late-binding trap). Full suite
+**122 passed**, ruff 0.16.1 clean. No real agent run yet — that needs auth + long wall-clock
+against prepared squidpy; the orchestration is verified offline.
+
+Deferred to later steps: `--max-concurrency` override on `tasks` (uses `cfg.max_concurrency`);
+the warm dataset cache that makes 50 shards cheap (P3); tuning tasks-per-notebook (prompt asks for
+"one to three, one per distinct analysis" — no knob until evidence says one is needed).
