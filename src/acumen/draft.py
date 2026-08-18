@@ -75,6 +75,7 @@ async def draft_skill(
     max_usd: float | None = None,
     rationale: str = "initial draft",
     feedback: str | None = None,
+    rulebook: str | None = None,
     log: LiveLog | None = None,
 ) -> DraftResult:
     """Draft a new skill version from the target package's source.
@@ -101,6 +102,10 @@ async def draft_skill(
     feedback
         Optional maintainer guidance, injected into the draft prompt as a subordinated block
         and recorded in ``meta.json`` as provenance.
+    rulebook
+        The draft-instruction template (a rulebook version's text) to draft from. ``None`` uses the
+        built-in :data:`acumen.prompts.DRAFT_PROMPT`, so a plain ``acumen draft`` is unchanged; the
+        rulebook loop passes a versioned template so the skill is drafted from the rulebook on trial.
     log
         A :class:`LiveLog` to stream the agent's messages to and render an HTML log from.
 
@@ -143,6 +148,7 @@ async def draft_skill(
             out=staging,
             skill_name=cfg.skill_name,
             feedback=feedback,
+            template=rulebook,
         )
         options = ClaudeAgentOptions(
             cwd=str(work),

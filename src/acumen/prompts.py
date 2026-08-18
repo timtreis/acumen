@@ -277,6 +277,71 @@ When you are done, `{skill_dir}/SKILL.md` exists and starts with the frontmatter
 """
 
 
+RULEBOOK_IMPROVE_PROMPT = """\
+You are improving a RULEBOOK: the reusable instructions a drafting agent follows to write a Claude
+Skill (`SKILL.md`) for the Python package `{package}`. You are NOT writing a skill. You are editing
+the *instructions that generate* one, so the NEXT skill drafted from them succeeds more often.
+
+You are producing rulebook version {new_version} — an improvement of {parent_version}.
+
+# What a rulebook is
+
+A rulebook is a prompt template. A drafting agent is handed it, fills in the placeholders (the
+package, where its source is, where to write, the skill name), and follows it to produce a skill.
+The current rulebook is at `{rulebook_path}` — a copy you EDIT IN PLACE; what it contains when you
+finish becomes {new_version}.
+
+# What you can read
+
+- `{rulebook_path}` — the current rulebook ({parent_version}). Edit this file.
+- `{train_dir}` — evidence from benchmarking the skill THIS rulebook produced, on the TRAIN split.
+  Read `{train_dir}/SUMMARY.md` first. For each run: the task, the expected answer, the answer the
+  drafted skill's agent gave, whether it passed, and WHETHER THE SKILL LOADED AT ALL. This is your
+  only signal about what the rulebook's instructions actually produce.
+
+# What you are NOT allowed to see
+
+A separate, held-out TEST split measures whether your rulebook change generalises rather than
+tuning to these particular tasks. You must not see it; any tool call that reaches test results is
+BLOCKED. Do not attempt it — reaching test data would invalidate the benchmark.
+
+# Two failures, two fixes — same as for a skill, one level up
+
+Each run records whether the skill LOADED and whether it SUCCEEDED. Separate them:
+1. **Skill never loaded** — the rulebook's guidance on writing the `description` is too weak. The
+   only lever on loading is what the rulebook tells the drafter to put in the description.
+2. **Skill loaded but failed** — the rulebook's guidance on the skill BODY is too weak: it let the
+   drafter leave something out, or steered it wrong. Fix the instruction, not one skill's wording.
+
+# Improve the INSTRUCTIONS, never the instance — this is the whole point
+
+You are editing reusable instructions, so the failure mode is baking in a specific case:
+- **Fix the methodology, not the case.** If the drafted skill failed because it never told the
+  agent where an output lands, the rulebook fix is a stronger GENERAL instruction to document
+  where outputs land — never the specific output location from this task.
+- **NEVER put a task-specific fact in the rulebook.** No dataset name, parameter value, expected
+  answer, function name, or anything you saw in the train runs. The rulebook generates skills for
+  work you have not seen; baking in particulars is both overfitting and the wrong level entirely.
+- **Keep it general and lean.** Every rulebook instruction is paid on every future draft. Add one
+  only where the evidence shows the current rulebook lets a drafter go wrong; cut one that changed
+  nothing.
+- **Preserve every `{{...}}` placeholder EXACTLY** — `{{package}}`, `{{src}}`, `{{python}}`,
+  `{{out}}`, `{{skill_name}}`, `{{version}}`, `{{feedback}}`. They tell the drafter which package,
+  where to read, and where to write. Dropping, renaming, or adding one breaks every future draft.
+
+# What you must write
+
+1. Edit `{rulebook_path}` in place. It must stay a valid draft-prompt template: the same
+   placeholders, still instructing the drafter to write a `SKILL.md` that begins with honest
+   `name`/`description` frontmatter.
+2. `{rationale_path}` — one short paragraph: WHICH rulebook instruction you changed and WHY,
+   grounded in the train evidence. Write it OUTSIDE the rulebook file.
+{feedback}
+When you are done, `{rulebook_path}` still fills cleanly with the placeholders above, and
+`{rationale_path}` holds your rationale.
+"""
+
+
 TASKGEN_PROMPT = """\
 You are writing a benchmark of real analysis tasks for a Python package (`{package}`). Each
 task states a GOAL a user has, in plain language, plus the single answer a correct analysis
@@ -749,6 +814,7 @@ def draft_prompt(
     out: Path,
     skill_name: str,
     feedback: str | None = None,
+    template: str | None = None,
 ) -> str:
     """Build the prompt for the drafting agent.
 
@@ -772,12 +838,18 @@ def draft_prompt(
     feedback
         Optional maintainer guidance, subordinated below the hard rules. ``None`` leaves the
         prompt byte-identical to a run without the flag.
+    template
+        The draft-instruction template to fill, i.e. a *rulebook* version's text. Defaults to the
+        built-in :data:`DRAFT_PROMPT` when ``None``, so a plain ``acumen draft`` is unchanged. The
+        rulebook loop passes ``rulebooks/vN/rulebook.md`` here to draft from the version on trial;
+        the template must carry the same placeholders this fills (validated by
+        :func:`acumen.rulebooks.validate_rulebook`).
 
     Returns
     -------
     The draft prompt.
     """
-    return DRAFT_PROMPT.format(
+    return (template or DRAFT_PROMPT).format(
         package=package,
         version=version,
         src=src,
@@ -849,6 +921,57 @@ def improve_prompt(
         train_dir=train_dir,
         rationale_path=rationale_path,
         skill_name=skill_name,
+        parent_version=parent_version,
+        new_version=new_version,
+        feedback=feedback_block(feedback),
+    )
+
+
+def rulebook_improve_prompt(
+    *,
+    package: str,
+    rulebook_path: Path,
+    train_dir: Path,
+    rationale_path: Path,
+    parent_version: str,
+    new_version: str,
+    feedback: str | None = None,
+) -> str:
+    """Build the prompt for the outer-loop agent that improves the *rulebook*.
+
+    One level up from :func:`improve_prompt`: the artifact under edit is the draft-instruction
+    template (a rulebook version), not a skill. The evidence is the same train-split material the
+    skill improver reads — how the skill THIS rulebook produced performed — but the fix is to the
+    reusable instructions, so the prompt hammers on "improve the methodology, never the instance"
+    and on preserving the template placeholders. The held-out test split stays unreachable,
+    enforced structurally and by the same guard the skill improver uses.
+
+    Parameters
+    ----------
+    package
+        The target package name, for orientation.
+    rulebook_path
+        The staged rulebook copy the agent edits in place to produce the new version.
+    train_dir
+        The train-split evidence directory (``SUMMARY.md`` + per-run material), laid out by the
+        same writer the skill improver uses.
+    rationale_path
+        Where the agent writes its rationale — outside the rulebook file.
+    parent_version, new_version
+        The rulebook version being improved and the one being produced, e.g. ``v1`` -> ``v2``.
+    feedback
+        Optional maintainer guidance, subordinated below the hard rules. ``None`` leaves the
+        prompt byte-identical to a run without the flag.
+
+    Returns
+    -------
+    The rulebook-improve prompt.
+    """
+    return RULEBOOK_IMPROVE_PROMPT.format(
+        package=package,
+        rulebook_path=rulebook_path,
+        train_dir=train_dir,
+        rationale_path=rationale_path,
         parent_version=parent_version,
         new_version=new_version,
         feedback=feedback_block(feedback),

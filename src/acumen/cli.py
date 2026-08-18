@@ -15,8 +15,10 @@ from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
+from acumen.loop import LoopError, run_iteration
 from acumen.paths import SPLITS
 from acumen.report import ReportError, build_report
+from acumen.rulebooks import RulebookError
 from acumen.runner import RunOutcome, StderrFilter
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
@@ -452,6 +454,71 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
     return 0
 
 
+def _cmd_loop(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    tasks = load_tasks(args.tasks)
+    if args.max_concurrency:
+        cfg = replace(cfg, max_concurrency=args.max_concurrency)
+
+    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    _print_auth(auth_mode)
+    print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
+    target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
+    print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+    print(
+        "PROTOTYPE loop: draft skill from rulebook v1 -> bench -> improve rulebook to v2 -> "
+        "draft -> bench. This runs several agents and full benchmark passes; it is slow.",
+        flush=True,
+    )
+
+    def on_done(outcome: RunOutcome) -> None:
+        mark = "✓" if outcome.success else "✗"
+        k = outcome.key
+        print(f"  {mark} {k.split}/{k.task_id}/rep_{k.rep} ({outcome.reason})", flush=True)
+
+    result = asyncio.run(
+        run_iteration(
+            cfg=cfg,
+            target=target,
+            skills_root=args.skills,
+            rulebooks_root=args.rulebooks,
+            runs_root=args.runs,
+            tasks=tasks,
+            auth_mode=auth_mode,
+            task_ids=args.task,
+            feedback=args.feedback,
+            log_dir=args.log_dir,
+            stream=args.stream,
+            on_bench_done=on_done,
+        )
+    )
+
+    base, imp = result.baseline_score, result.improved_score
+    print(f"\nrulebook {result.baseline_version} -> {result.improved_version}")
+    print(
+        f"  held-out (test) pass rate: {base.passed}/{base.total} ({base.rate:.0%})  ->  "
+        f"{imp.passed}/{imp.total} ({imp.rate:.0%})   [moved {result.moved:+d} passes]"
+    )
+    print(
+        f"  baseline train pass rate:  {result.baseline_train_score.passed}/"
+        f"{result.baseline_train_score.total} ({result.baseline_train_score.rate:.0%})  (drove the improvement)"
+    )
+    if not result.rulebook.changed:
+        print("  note: the improve agent left the rulebook unchanged — no movement is expected", file=sys.stderr)
+    print(f"  rulebook rationale: {result.rulebook.rationale}")
+
+    diff_path = args.rulebooks / result.improved_version / f"from-{result.baseline_version}.diff"
+    diff_path.write_text(result.rulebook_diff)
+    print(f"  rulebook diff: {diff_path}  ({result.rulebook_diff.count(chr(10))} lines)")
+    print(f"  cost: ${result.cost_usd:.2f}")
+    print(
+        "\nNOTE (prototype): held-out here is the within-task test variant, not a task partition; "
+        "a single iteration is not protected against selection leakage. This measures whether the "
+        "rulebook loop moves a score, not a trustworthy final number."
+    )
+    return 0
+
+
 def _cmd_ship(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     if args.model:
@@ -618,6 +685,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_log_args(tasks_cmd)
     tasks_cmd.set_defaults(func=_cmd_tasks)
 
+    loop = sub.add_parser(
+        "loop",
+        help="PROTOTYPE: optimize the rulebook one iteration (draft->bench->improve rulebook->draft->bench)",
+    )
+    loop.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
+    loop.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
+    loop.add_argument("--skills", type=Path, default=Path("skills"), help="root of the skill tree")
+    loop.add_argument("--rulebooks", type=Path, default=Path("rulebooks"), help="root of the rulebook tree")
+    loop.add_argument("--runs", type=Path, default=Path("runs"), help="root of the run tree")
+    loop.add_argument("--task", metavar="ID", action="append", help="restrict to a task id (repeatable)")
+    loop.add_argument("--max-concurrency", type=int, help="override config max_concurrency")
+    loop.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    loop.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    _add_auth_arg(loop)
+    _add_feedback_arg(loop)
+    _add_log_args(loop)
+    loop.set_defaults(func=_cmd_loop)
+
     ship = sub.add_parser("ship", help="make a benchmarked skill installable into the target package")
     ship.add_argument(
         "--skill", dest="version", metavar="VERSION", required=True, help="skill version to ship, e.g. v2"
@@ -676,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
         ShipError,
         ReportError,
         InitError,
+        LoopError,
+        RulebookError,
     ) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2

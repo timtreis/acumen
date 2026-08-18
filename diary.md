@@ -182,3 +182,61 @@ against prepared squidpy; the orchestration is verified offline.
 Deferred to later steps: `--max-concurrency` override on `tasks` (uses `cfg.max_concurrency`);
 the warm dataset cache that makes 50 shards cheap (P3); tuning tasks-per-notebook (prompt asks for
 "one to three, one per distinct analysis" — no knob until evidence says one is needed).
+
+---
+
+## 2026-08-19 — Spike: crude end-to-end rulebook loop (P6+P7 prototype)
+
+**Task.** Before investing in P2–P5, prototype the two-level optimizer to answer one feasibility
+question: *does optimizing the rulebook (the SKILL-generating instructions) — not a skill directly
+— actually move a held-out score, and is the failure signal legible enough to drive the next
+rulebook version?* Classified as a **spike**: throwaway-ish, runnable on a Claude subscription so
+the user (or anyone) can run it, informs the real plan.
+
+**Key finding, surfaced building it.** acumen could **not** already run the loop on a subscription:
+`_cmd_bench` hardcodes `resolve_auth_mode("api", allow_session=False)` because bench records real
+per-run `cost_usd`, so a subscription user is refused. The loop's inner scoring *is* bench. The fix
+was lazy: the underlying `run_matrix`/`run_once` already accept `auth_mode="session"` — only the
+bench *CLI preflight* forbids it. The loop is new code, so it calls `run_matrix(auth_mode="session")`
+directly and scores **pass rate, not dollars**; the existing `bench` command's API-only cost
+semantics are untouched. This is the kind of structural snag the spike existed to find, and it
+would have blocked P7 regardless.
+
+**Design realization that shrank the prototype.** "Held-out" in the crude version is the *existing
+within-task test split* (`tasks.py` train/test variants), not a task partition. So: rulebook
+improvement is driven by **train**-split failure evidence, the rulebook is scored on **test**-split
+pass rate, and leakage protection comes **free** from the same `runs/*/test/` guard the skill
+improver already uses. No new slicing, and I reuse `collect_train_runs` / `_write_material` /
+`make_test_guard` wholesale. Honest per the target design's own note that within-task train/test is
+orthogonal to the eventual CV-over-tasks axis (P5 adds the task partition).
+
+**Approach.** `rulebooks.py` (crude P6): the rulebook is the draft-prompt *template text*, versioned
+at `rulebooks/vN/rulebook.md`; v1 is seeded verbatim from `DRAFT_PROMPT` (so iteration 0 reproduces
+today's drafting exactly — verified byte-identical). `validate_rulebook` guards the two ways the
+outer agent can break the template (a stray `{placeholder}` the drafter can't fill; a dropped
+`{out}`/`{skill_name}`). One seam threads it through: `draft_prompt(template=...)` →
+`draft_skill(rulebook=...)`, both defaulting to the built-in so plain `acumen draft` is unchanged.
+`loop.py` (crude P7): `improve_rulebook` mirrors `improve_skill` one level up (edits the rulebook
+from train evidence, same held-out guard); `run_iteration` drives seed v1 → draft → bench both
+splits → score test → improve rulebook → draft v2 → bench test → score, reporting P1 vs P2 + the
+v1→v2 rulebook diff + the improve rationale. Resumable by file presence at every step (drafted
+skills, bench runs, and the improved rulebook all skip if already on disk). New outer-improve prompt
+`RULEBOOK_IMPROVE_PROMPT` hammers "improve the methodology, never the instance" and "preserve every
+placeholder." Exposed as `acumen loop` (subscription by default), which prints a blunt prototype
+caveat: single iteration, within-task held-out, not protected against selection leakage — it
+measures whether the loop *moves a score*, not a trustworthy final number.
+
+**Result.** New `tests/test_loop.py` (7 tests): rulebook seeding/idempotence/immutability/validation,
+the draft-prompt transparency of v1, the disk scorer, and `run_iteration` end-to-end with all three
+agent boundaries (`draft_skill`, `run_matrix`, `improve_rulebook`) monkeypatched — a scripted +1
+held-out move, exact version lockstep and cost accounting, and a resumed run that respawns **zero**
+agents yet reproduces the scores from disk. Full suite **129 passed**, ruff 0.16.1 clean. Fixed a
+`seed_default` bug found by the resume test (it returned the latest version, so a resumed loop
+mistook v2 for its baseline; now always anchors on v1).
+
+**Not yet run for real.** The feasibility *answer* needs a subscription run against prepared squidpy
+(`acumen loop`, tens of minutes). The orchestration is verified offline; the real signal — did
+held-out move, was the rulebook diff sensible — comes from that run and will set the P2–P5 plan.
+Reused private helpers `_write_material`/`_read_rationale` from `improve.py` (same package, prototype
+scope). When P5 lands (CV + lockbox), the loop's control flow gets restructured; this is the seed,
+not the final loop.
