@@ -240,3 +240,24 @@ held-out move, was the rulebook diff sensible — comes from that run and will s
 Reused private helpers `_write_material`/`_read_rationale` from `improve.py` (same package, prototype
 scope). When P5 lands (CV + lockbox), the loop's control flow gets restructured; this is the seed,
 not the final loop.
+
+---
+
+## 2026-08-19 — Cost is not an optimization metric; unblock `bench` on a subscription
+
+**Task.** User steering: dollar/token cost is not a metric to optimize for or against. Budget is
+effectively infinite; the binding constraints stay wall-clock and selection leakage.
+
+**Change.** The one place this was load-bearing in code was `bench`: it forced API billing purely to
+record real per-run `cost_usd`. Removed the `allow_session` parameter from `resolve_auth_mode`
+entirely (it existed only to model bench's API-only stance, and became dead once cost stopped
+mattering), gave `bench` the same `--auth {auto,session,api}` flag every other command has, and
+updated the docstrings/comments that claimed bench must bill the API. A subscription `bench` now
+runs and simply records no meaningful cost. This makes **all** of acumen subscription-runnable,
+consistent with the loop, which already scored pass rate rather than dollars. Merged the two
+`resolve_auth_mode` tests into one (the bench-specific case is gone). Full suite **128 passed**,
+ruff clean. Saved the steering to project memory (`cost-not-an-optimization-metric`).
+
+**Implication still open (not done):** the report's "lean yet useful" Pareto frontier is currently
+cost-vs-success (`report.py`); under this steering the second axis should become **skill size**, not
+cost. Deferred to the leanness work — flagged, not yet built.

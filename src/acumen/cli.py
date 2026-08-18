@@ -66,11 +66,13 @@ def _add_feedback_arg(parser: argparse.ArgumentParser, *, extra: str = "") -> No
 
 
 def _add_auth_arg(parser: argparse.ArgumentParser) -> None:
-    """Add the ``--auth`` flag to a single-agent subcommand.
+    """Add the ``--auth`` flag to a subcommand.
 
-    These commands spawn one agent, so they default to the Claude subscription ("session")
-    when a subscription login is present and fall back to the API key otherwise. ``bench`` has
-    no such flag — it always bills the API so its recorded ``cost_usd`` is real.
+    Every agentic command defaults to the Claude subscription ("session") when a subscription
+    login is present and falls back to the API key otherwise. ``bench`` carries this flag too —
+    it used to be barred from the subscription to keep its recorded ``cost_usd`` real, but cost is
+    not a metric acumen optimizes, so a subscription ``bench`` is allowed and simply records no
+    meaningful per-run cost.
     """
     parser.add_argument(
         "--auth",
@@ -198,8 +200,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     if not todo:
         return 0
 
-    # bench records real per-run cost, so it must bill the API — never the subscription.
-    auth_mode = resolve_auth_mode("api", allow_session=False)
+    auth_mode = resolve_auth_mode(args.auth)
+    _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]} (venv {target.venv_dir})", flush=True)
@@ -260,7 +262,7 @@ def _cmd_draft(args: argparse.Namespace) -> int:
         )
         return 2
 
-    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
@@ -314,7 +316,7 @@ def _cmd_improve(args: argparse.Namespace) -> int:
     skill = load_skill(args.skills, parent, expect_name=cfg.skill_name)
     print(f"improving {skill.version} ({skill.name}, {skill.hash[:19]}…) with {cfg.improve_model}")
 
-    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
@@ -371,7 +373,7 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
         )
         return 2
 
-    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
@@ -460,7 +462,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
     if args.max_concurrency:
         cfg = replace(cfg, max_concurrency=args.max_concurrency)
 
-    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
@@ -533,7 +535,7 @@ def _cmd_ship(args: argparse.Namespace) -> int:
         else ("a GitHub URL — the change is delivered as a pull request")
     )
     print(f"shipping {args.version} of {cfg.skill_name} into {cfg.repo} ({where})")
-    auth_mode = resolve_auth_mode(args.auth, allow_session=True)
+    auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
@@ -623,6 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     bench = sub.add_parser("bench", help="run a benchmark pass")
     _add_bench_args(bench)
+    _add_auth_arg(bench)
     bench.set_defaults(func=_cmd_bench)
 
     draft = sub.add_parser("draft", help="draft a skill from the target package's source")

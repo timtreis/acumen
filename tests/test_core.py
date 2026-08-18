@@ -468,46 +468,31 @@ def test_session_and_api_availability(tmp_path: Path, monkeypatch: pytest.Monkey
     assert session_auth_available() is True
 
 
-def test_resolve_auth_mode_for_meta_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_auth_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_auth(monkeypatch, tmp_path)
 
     # No credentials at all → auto cannot resolve.
     with pytest.raises(EnvError, match="no Claude credentials"):
-        resolve_auth_mode("auto", allow_session=True)
+        resolve_auth_mode("auto")
 
     # auto prefers the subscription when a login exists.
     _write_oauth_credentials(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert resolve_auth_mode("auto", allow_session=True) == "session"
+    assert resolve_auth_mode("auto") == "session"
 
     # auto falls back to the API when there is no subscription.
     (tmp_path / ".credentials.json").unlink()
-    assert resolve_auth_mode("auto", allow_session=True) == "api"
+    assert resolve_auth_mode("auto") == "api"
 
     # Forcing a mode requires that mode's credential.
-    assert resolve_auth_mode("api", allow_session=True) == "api"
+    assert resolve_auth_mode("api") == "api"
     with pytest.raises(EnvError, match="--auth session"):
-        resolve_auth_mode("session", allow_session=True)
+        resolve_auth_mode("session")
     _write_oauth_credentials(tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert resolve_auth_mode("session", allow_session=True) == "session"
+    assert resolve_auth_mode("session") == "session"
     with pytest.raises(EnvError, match="--auth api"):
-        resolve_auth_mode("api", allow_session=True)
-
-
-def test_resolve_auth_mode_for_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_auth(monkeypatch, tmp_path)
-
-    # bench never bills the subscription, even when only a subscription is available.
-    _write_oauth_credentials(tmp_path)
-    with pytest.raises(EnvError, match="session is not available for it"):
-        resolve_auth_mode("session", allow_session=False)
-    with pytest.raises(EnvError, match="must bill the API"):
-        resolve_auth_mode("api", allow_session=False)
-
-    # With an API credential, bench resolves to api.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert resolve_auth_mode("api", allow_session=False) == "api"
+        resolve_auth_mode("api")
 
 
 def test_scrubbed_env_auth_mode_filters_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

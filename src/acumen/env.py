@@ -375,42 +375,25 @@ def api_auth_available() -> bool:
     return any(os.environ.get(var) for var in API_AUTH_ENV_VARS)
 
 
-def resolve_auth_mode(requested: str, *, allow_session: bool) -> AuthMode:
+def resolve_auth_mode(requested: str) -> AuthMode:
     """Resolve a requested auth choice to the concrete mode a run will use, or fail loudly.
 
-    A preflight guard that replaces :func:`check_auth` on the agentic commands: it both
-    validates that the chosen credential is actually reachable and reports which mode the
-    run will bill, so the choice is never silent.
+    A preflight guard for every agentic command (``bench`` included): it both validates that the
+    chosen credential is actually reachable and reports which mode the run will bill, so the choice
+    is never silent. Every command may run on the subscription — ``bench`` used to be barred from it
+    to keep its recorded ``cost_usd`` real, but cost is not a metric acumen optimizes, so that
+    restriction is gone; a subscription ``bench`` simply records no meaningful per-run cost.
 
     Parameters
     ----------
     requested
         The user's choice: ``"auto"`` (prefer the subscription, else the API), ``"session"``
         (force the subscription), or ``"api"`` (force the API).
-    allow_session
-        Whether the subscription is a permitted mode. ``bench`` passes ``False`` because it
-        records real per-run ``cost_usd``, which only means anything under metered API
-        billing — so bench always resolves to ``"api"`` and rejects ``"session"``.
 
     Returns
     -------
     ``"session"`` or ``"api"``.
     """
-    if not allow_session:
-        if requested == "session":
-            raise EnvError(
-                "bench records real per-run cost and must bill the API, so --auth session is "
-                "not available for it — the Claude subscription does not meter per-run spend. "
-                "Run the single-agent commands (draft/improve/tasks/ship) on the session instead."
-            )
-        if not api_auth_available():
-            raise EnvError(
-                "no API credential found — bench must bill the API. Set ANTHROPIC_API_KEY (or "
-                "ANTHROPIC_AUTH_TOKEN), or enable a provider with CLAUDE_CODE_USE_BEDROCK / "
-                "CLAUDE_CODE_USE_VERTEX."
-            )
-        return "api"
-
     if requested == "session":
         if not session_auth_available():
             raise EnvError(
