@@ -443,6 +443,7 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
             feedback=args.feedback,
             log_dir=args.log_dir,
             stream=args.stream,
+            notebook_filter=args.notebook,
             on_shard_done=on_done,
         )
     )
@@ -682,6 +683,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="where per-notebook shard files live (default: <out>.shards next to --out); "
         "delete a shard file to regenerate just that notebook",
+    )
+    tasks_cmd.add_argument(
+        "--notebook",
+        metavar="SUBSTR",
+        action="append",
+        help="with --per-notebook: only shard notebooks whose path contains SUBSTR (repeatable)",
     )
     _add_auth_arg(tasks_cmd)
     _add_feedback_arg(tasks_cmd, extra=" (e.g. which functionality to skip or focus on)")

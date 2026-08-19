@@ -617,6 +617,7 @@ async def generate_tasks_sharded(
     feedback: str | None = None,
     log_dir: Path | None = None,
     stream: bool = False,
+    notebook_filter: Sequence[str] | None = None,
     on_shard_start: Callable[[ShardOutcome], None] | None = None,
     on_shard_done: Callable[[ShardOutcome], None] | None = None,
 ) -> ShardedResult:
@@ -663,6 +664,10 @@ async def generate_tasks_sharded(
         If given, each shard streams a :class:`LiveLog` to ``log_dir/acumen-tasks-<slug>-*.jsonl``.
     stream
         Mirror each shard's log to the terminal (noisy under concurrency; off by default).
+    notebook_filter
+        If given, keep only notebooks whose POSIX path contains any of these substrings — so a run
+        can target a handful of notebooks (a proof run, or regenerating a subset) instead of the
+        whole package. ``None`` shards every notebook.
     on_shard_start, on_shard_done
         Optional progress callbacks, invoked as each shard is admitted and as it lands.
 
@@ -690,6 +695,10 @@ async def generate_tasks_sharded(
                 "tutorials to shard on. Check submodules are present, or use generate_tasks to "
                 "infer analyses from source instead."
             )
+        if notebook_filter:
+            notebooks = [nb for nb in notebooks if any(s in nb.as_posix() for s in notebook_filter)]
+            if not notebooks:
+                raise TaskGenError(f"no notebooks matched --notebook {list(notebook_filter)}")
         shards_dir.mkdir(parents=True, exist_ok=True)
 
         semaphore = asyncio.Semaphore(max_concurrency or cfg.max_concurrency)

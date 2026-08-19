@@ -308,3 +308,31 @@ are exactly P4 (difficulty-calibrated tasks with baseline headroom) and honest r
 improved version on the cases it targets. Findings saved to memory
 (`bench-agent-backgrounds-heavy-tasks`, `task-supply-is-large-scale-mining`). Artifacts left in
 `~/acumen-squidpy` (rulebooks/v1,v2, skills/v1,v2, runs/, loop.log, logs/).
+
+---
+
+## 2026-08-19 — Critical path, steps 1–2: reliable bench + first proven task-gen
+
+**Plan.** Chose the "critical path to a measurable loop": (1) stop the bench sandbox stranding a run
+by backgrounding; (2) prove P1 task-gen actually works on a real agent; (3) build P4 difficulty
+screening and rerun the loop on a baseline-failing held-out.
+
+**Step 1 — reliable bench (done, shipped).** Added `find_background_use` + `make_sync_guard`
+(`runner.py`), a `PreToolUse` hook that denies `run_in_background` and monitor-style tools in the
+sandbox, identical across arms so baseline parity holds; plus a synchronous-execution line in the
+harness preamble. Unit-tested. This converts a stranded run into either an inline completion or an
+honest cap breach.
+
+**Step 2 — task-gen proven (done).** Added a small `--notebook SUBSTR` filter to the sharded path
+(`generate_tasks_sharded` + CLI) so a run can target a handful of notebooks. Ran the **first real
+P1 task-gen agent** against squidpy's `examples/graph/compute_centrality_scores` on the
+subscription. Result: **3 well-formed tasks** ($0.80), each an imc(train)/seqfish(test) pair over a
+distinct centrality measure (degree / closeness / clustering), one-paragraph goals with precise
+categorical outputs. Independently recomputed all six ground-truth answers with squidpy — **6/6
+correct** (`CK low HR low tumor cell`, `apoptotic tumor cell`, `endothelial`; `Cardiomyocytes`,
+`Low quality`, `Erythroid`). So P1 generates trustworthy tasks with real executed ground truth, not
+just valid-looking YAML. Minor quality note: prompts are a touch recipe-ish ("build a spatial
+neighbor graph and compute…") vs. the pure lazy-goal ideal — a later rulebook/prompt refinement, not
+a blocker. These centrality tasks are also promising *calibrated* candidates: exact-match on a
+cell-type string like "CK low HR low tumor cell" is unforgiving, so the baseline likely fails them
+(headroom) — step 3 will confirm.
