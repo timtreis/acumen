@@ -59,7 +59,7 @@ from acumen.report import (
     skill_tests,
     tradeoff_figure,
 )
-from acumen.runner import StderrFilter, _skill_fired
+from acumen.runner import StderrFilter, _skill_fired, find_background_use
 from acumen.ship import _ship_env
 from acumen.skills import SkillError, load_skill, read_meta, skill_hash, write_meta
 from acumen.tasks import TaskError, load_tasks, parse_tasks
@@ -89,6 +89,18 @@ def test_grade_run_reads_answer_md(tmp_path: Path) -> None:
 
 
 # --- run paths -------------------------------------------------------------------------
+
+
+def test_find_background_use_flags_only_deferred_work() -> None:
+    # A normal synchronous Bash call is fine.
+    assert find_background_use("Bash", {"command": "python script.py"}) is None
+    assert find_background_use("Bash", {"command": "ls", "run_in_background": False}) is None
+    # Backgrounding a command would strand a one-shot run.
+    assert find_background_use("Bash", {"command": "python slow.py", "run_in_background": True}) == "run_in_background"
+    # A monitor-style tool waits on notifications that never arrive.
+    assert find_background_use("Monitor", {"command": "tail -f log"}) == "Monitor"
+    # Unrelated tools pass through.
+    assert find_background_use("Read", {"file_path": "answer.md"}) is None
 
 
 def test_run_dir_round_trips(tmp_path: Path) -> None:

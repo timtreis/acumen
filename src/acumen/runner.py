@@ -13,9 +13,9 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
 
 from acumen.env import AuthMode, Target, sdk_version
 from acumen.grade import Grade, Reason, grade_run
@@ -153,6 +153,56 @@ class StderrFilter:
         print(line, file=self._sink, flush=True)
 
 
+#: Tool names that hand work to an out-of-band worker and then wait for a notification — which a
+#: one-shot benchmark ``query()`` never delivers. Denied outright in the sandbox (see below).
+_BACKGROUND_TOOLS = frozenset({"Monitor"})
+
+
+def find_background_use(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """Return why a tool call would defer work to the background, or ``None`` if it runs inline.
+
+    A benchmark run is a single, non-interactive ``query()``. If the agent launches a command with
+    ``run_in_background`` (or reaches for a monitor tool) and ends its turn to await a completion
+    notification, that notification never arrives — the run strands and writes no ``answer.md``,
+    scoring a spurious failure that reflects job-scheduling, not the skill. Observed on the first
+    real loop run against squidpy. Pure and side-effect free, so it can be exercised without an
+    agent (mirrors :func:`acumen.improve.find_test_access`).
+    """
+    if tool_input.get("run_in_background") is True:
+        return "run_in_background"
+    if tool_name in _BACKGROUND_TOOLS:
+        return tool_name
+    return None
+
+
+def make_sync_guard() -> HookMatcher:
+    """Build the ``PreToolUse`` hook that forces every benchmark tool call to run inline.
+
+    Structural, not just prompt-level: even if the agent tries to background a slow command, the
+    call is denied with a reason telling it to run synchronously. ``matcher=None`` fires for every
+    tool. The guard is identical in both arms, so baseline parity is preserved — it changes how a
+    run behaves, never how the two arms differ.
+    """
+
+    async def guard(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        hit = find_background_use(input_data.get("tool_name", ""), input_data.get("tool_input", {}) or {})
+        if hit is None:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"This is a one-shot benchmark run — there is no notification channel, so a "
+                    f"backgrounded task ({hit}) would strand the run. Execute the command "
+                    "synchronously (do not set run_in_background) and wait for it inline."
+                ),
+            }
+        }
+
+    return HookMatcher(matcher=None, hooks=[guard])
+
+
 def _build_options(
     *,
     box: Sandbox,
@@ -188,6 +238,9 @@ def _build_options(
         setting_sources=["project"],
         permission_mode="bypassPermissions",
         system_prompt={"type": "preset", "preset": "claude_code"},
+        # Deny backgrounding so a slow command can never strand the one-shot run waiting on a
+        # notification that never comes. Identical in both arms, so baseline parity holds.
+        hooks={"PreToolUse": [make_sync_guard()]},
         stderr=stderr,
     )
 

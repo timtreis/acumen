@@ -61,6 +61,10 @@ not read by a human.
 - The target package (`{package}`) is already installed. Run Python with `{python}`,
   which is also `python` on your PATH. Do not create virtualenvs and do not install or
   upgrade packages.
+- Run every command SYNCHRONOUSLY and wait for it inline. This is a one-shot run with no
+  notification channel, so a backgrounded command never reports back and the run strands with
+  no answer. If a step is slow, bound it (a subset, a cheaper mode, a parallelism argument) —
+  do not defer it to the background.
 - You have web access. Use it if it helps.
 
 # What you must leave behind

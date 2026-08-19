@@ -261,3 +261,50 @@ ruff clean. Saved the steering to project memory (`cost-not-an-optimization-metr
 **Implication still open (not done):** the report's "lean yet useful" Pareto frontier is currently
 cost-vs-success (`report.py`); under this steering the second axis should become **skill size**, not
 cost. Deferred to the leanness work — flagged, not yet built.
+
+---
+
+## 2026-08-19 — First real end-to-end loop run on squidpy (subscription)
+
+**Task.** Run the crude loop once against real squidpy on the Claude subscription — the feasibility
+answer the spike was built for.
+
+**Setup.** Workspace at `~/acumen-squidpy` (config → scverse/squidpy, sonnet, 1 rep). Auth: minted
+a `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token` (the machine's login is in the macOS Keychain,
+which acumen can't read — token file is the bridge). Prepared the target (no auth), then **authored
+one task by hand from executed ground truth** rather than trust the unproven task-gen agent:
+"most spatially variable gene by Moran's I", train `slideseqv2 → Ttr`, held-out `merfish → Nnat`,
+both computed in the target venv and checked for normalization-robustness.
+
+**What happened.** The loop ran the whole two-level machinery to completion on the subscription:
+draft skill from rulebook v1 → bench (train+test, `auth=session`) → improve rulebook to v2 → draft
+skill v2 → bench (test) → report. Held-out `1/1 → 1/1`, **moved +0**.
+
+**The signal — strongly positive on the core question.** The improve agent read the one failing
+train run and made a *sensible, general, non-overfit* rulebook edit. It correctly diagnosed a subtle
+failure (the drafted skill flagged an expensive full-gene Moran's call as "expensive… if runtime
+matters" but gave no lever to bound it; the sandbox agent ran it in the background and stalled its
+whole turn budget polling for a result that never came → no `answer.md`) and generalized the fix:
+a new drafting-rulebook bullet — *"Flag what runs long, and say how to bound it… name the concrete
+knob (subset/threshold/parallelism/cheaper mode), don't just call it expensive."* It explicitly
+refused to overfit ("not specific to Moran's I… squidpy has permutation tests, `sepal`, image
+processing with the same shape"). So the spike's real question — *is the failure signal legible
+enough to drive a good rulebook change?* — is answered **yes**.
+
+**What it did NOT show, and why.** No score movement, for two calibration reasons the run itself
+surfaced (both predicted by the target design):
+1. **Difficulty (P4) is a precondition, not a nicety.** The baseline skill v1 *already passed* the
+   held-out merfish task → held-out at ceiling, zero headroom. Without tasks the baseline fails, the
+   loop cannot demonstrate movement.
+2. **Benchmark-harness weight limit.** A heavy task (slideseqv2, 4000 genes) makes the sandbox agent
+   background its work and idle waiting for a notification that never arrives in a headless run →
+   spurious `no_answer_file`. Keep tasks inline-light, or harden the sandbox against backgrounding.
+   Also the crude loop only re-benches v2 on the *test* split, so v2's targeted fix (bounding heavy
+   calls) was never exercised on the heavy case it addresses — a real-loop design note.
+
+**Verdict.** The two-level optimizer concept works end-to-end and produces legible, generalizable
+rulebook improvements from real evidence — the bet pays off. The blockers to a *measurable* result
+are exactly P4 (difficulty-calibrated tasks with baseline headroom) and honest re-benching of the
+improved version on the cases it targets. Findings saved to memory
+(`bench-agent-backgrounds-heavy-tasks`, `task-supply-is-large-scale-mining`). Artifacts left in
+`~/acumen-squidpy` (rulebooks/v1,v2, skills/v1,v2, runs/, loop.log, logs/).
