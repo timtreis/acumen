@@ -336,3 +336,56 @@ neighbor graph and compute…") vs. the pure lazy-goal ideal — a later ruleboo
 a blocker. These centrality tasks are also promising *calibrated* candidates: exact-match on a
 cell-type string like "CK low HR low tumor cell" is unforgiving, so the baseline likely fails them
 (headroom) — step 3 will confirm.
+
+---
+
+## 2026-08-19 — Critical path, step 3: difficulty screening + a sharper loop metric
+
+**Built P4 screening (`difficulty.py` + `acumen screen`).** `screen()` reads the baseline
+(`noskill`) arm's runs and tallies per-(task,split) pass rate into strata (solved / flaky / hard /
+unscreened); `has_headroom` marks tasks the baseline does not already pass — the only ones a skill
+can be shown to help on. Read-only over the run tree, per reference model, unit-tested.
+
+**Screening the generated centrality tasks was itself the finding.** Benched the baseline on all 3
+generated tasks:
+- **sonnet baseline: 6/6 passed** → `screen` reported *no task has headroom*. sonnet solves
+  straightforward squidpy analyses with no skill.
+- Switched the *reference/bench model* to **haiku** (difficulty is model-dependent — the design
+  said so; kept draft/improve on sonnet so authoring stays strong). **haiku baseline: 5/6**, failing
+  only `closeness_most_central[test]` (seqfish). `screen` cleanly flagged that one as `hard` /
+  headroom. Note: that run took ~14 min because closeness centrality on a 19k-cell graph is
+  genuinely compute-heavy — a task-weight signal for the pool (favor cheap analyses).
+
+**Sharper loop metric (`noskill_score`).** The crude loop only compared rulebook v1→v2 held-out,
+which needs skill_v1 *itself* to fail — a demanding bar that the "does the skill help at all"
+question doesn't. Added `noskill_score`: the loop now reads the baseline arm's held-out pass rate
+from its runs tree (reusing a prior `screen`) and reports **noskill → skill v1 → skill v2** with both
+deltas (skill-vs-noskill, and rulebook-v1-vs-v2). This is the more fundamental signal and far
+easier to observe than rulebook self-improvement.
+
+**Measured loop run on the headroom task** (`closeness_most_central`, haiku agent, sonnet authoring;
+one mid-run failure when the Mac slept — reran under `caffeinate -i`, resumed cleanly). Result:
+**noskill 0/1 → skill v1 0/1 → skill v2 0/1**, no movement. But the *why* is two calibration
+problems, not a loop failure:
+
+1. **The skill never loaded** — `skill_loaded=False` on every arm including v2. haiku does not
+   reliably load skills, so the whole skill mechanism is neutralized; no rulebook change can help a
+   model that won't open the skill. The weak-model shortcut for headroom backfires: weak models
+   fail tasks *and* don't load skills. A demonstrable loop needs a **skill-loading** model (sonnet),
+   which means tasks hard *for sonnet*, not merely for haiku.
+2. **The generated task's answer is adversarial.** Ground truth `Low quality` is a QC-artifact group
+   that tops raw closeness; every agent (reasonably) reported a real cell type
+   (`Haematoendothelial progenitors`, `Cardiomyocytes`) and was marked wrong. Task-gen's "run it,
+   take the top" verification is insufficient — it must reject answers a thoughtful analyst would
+   exclude. A task-quality lever for the generation rulebook.
+
+The improve agent again reasoned well: v2's rationale correctly diagnosed a *description-coverage*
+gap (the v1 skill's description omitted centrality, so it couldn't load for a centrality task) and
+generalized the fix (enumerate the full public API, cross-check every capability against the
+description). The intelligence is sound; the bottleneck is decisively **task calibration** —
+hard-for-a-loading-model tasks with defensible answers — which is where P4 / generation effort must
+go, not the loop code. Saved to memory (`loop-needs-hard-tasks-on-a-loading-model`).
+
+**Critical-path status:** machinery all built and proven (reliable bench, real task-gen, difficulty
+screening, noskill→skill loop metric); the measured run has pinned the remaining blocker to task
+calibration + reference-model choice rather than any code gap.
