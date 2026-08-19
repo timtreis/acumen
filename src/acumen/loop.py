@@ -106,8 +106,13 @@ class LoopResult:
     #: Test-split (held-out) pass rate for each rulebook version.
     baseline_score: Score
     improved_score: Score
-    #: Train-split pass rate for the baseline, for context on what drove the improvement.
+    #: Train-split pass rate for rulebook v1, for context on what drove the improvement.
     baseline_train_score: Score
+    #: Held-out pass rate with NO skill (the floor a skill must beat), read from the noskill arm if
+    #: it was benched in ``runs_root`` (e.g. by a prior ``acumen screen``); ``total==0`` if absent.
+    #: This is the "does the skill help at all" signal, distinct from the "did the rulebook improve"
+    #: signal (baseline_score -> improved_score).
+    noskill_score: Score
     rulebook: RulebookResult
     rulebook_diff: str
     cost_usd: float
@@ -539,6 +544,11 @@ async def run_iteration(
     )
     improved_score = score(runs_root, [p for p in planned_v2 if p.key.split == "test"])
 
+    # The floor: how the no-skill baseline did on the same held-out, if it was benched into this
+    # runs tree (e.g. by `acumen screen`). Read-only — the loop does not run it, so a run without a
+    # prior baseline simply reports total==0. This is the "does the skill help at all" comparison.
+    noskill_score = score(runs_root, build_matrix(cfg, tasks, skill=None, splits=["test"], task_ids=task_ids))
+
     diff = "".join(
         difflib.unified_diff(
             baseline_text.splitlines(keepends=True),
@@ -555,6 +565,7 @@ async def run_iteration(
         baseline_score=baseline_score,
         improved_score=improved_score,
         baseline_train_score=baseline_train_score,
+        noskill_score=noskill_score,
         rulebook=rulebook,
         rulebook_diff=diff,
         cost_usd=total_cost,

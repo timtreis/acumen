@@ -192,6 +192,8 @@ def test_run_iteration_moves_the_held_out_score(tmp_path: Path, monkeypatch: pyt
     assert (result.improved_score.passed, result.improved_score.total) == (1, 1)
     assert result.baseline_train_score.passed == 1
     assert result.moved == 1
+    # No noskill arm was benched into runs_root by the fakes, so the floor reads as absent.
+    assert result.noskill_score.total == 0
     assert result.rulebook.changed
     assert result.rulebook_diff.strip()  # a real unified diff was produced
     assert result.cost_usd == pytest.approx(0.4)  # 0.1 draft + 0.2 improve + 0.1 draft

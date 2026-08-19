@@ -521,12 +521,20 @@ def _cmd_loop(args: argparse.Namespace) -> int:
         )
     )
 
-    base, imp = result.baseline_score, result.improved_score
+    base, imp, ns = result.baseline_score, result.improved_score, result.noskill_score
     print(f"\nrulebook {result.baseline_version} -> {result.improved_version}")
-    print(
-        f"  held-out (test) pass rate: {base.passed}/{base.total} ({base.rate:.0%})  ->  "
-        f"{imp.passed}/{imp.total} ({imp.rate:.0%})   [moved {result.moved:+d} passes]"
-    )
+    if ns.total:
+        print(
+            f"  held-out (test): noskill {ns.passed}/{ns.total} ({ns.rate:.0%})  ->  "
+            f"skill {result.baseline_skill} {base.passed}/{base.total} ({base.rate:.0%})  ->  "
+            f"skill {result.improved_skill} {imp.passed}/{imp.total} ({imp.rate:.0%})"
+        )
+        print(f"  skill vs no-skill: {imp.passed - ns.passed:+d} passes;   rulebook v1 vs v2: {result.moved:+d} passes")
+    else:
+        print(
+            f"  held-out (test) pass rate: {base.passed}/{base.total} ({base.rate:.0%})  ->  "
+            f"{imp.passed}/{imp.total} ({imp.rate:.0%})   [moved {result.moved:+d} passes]"
+        )
     print(
         f"  baseline train pass rate:  {result.baseline_train_score.passed}/"
         f"{result.baseline_train_score.total} ({result.baseline_train_score.rate:.0%})  (drove the improvement)"
