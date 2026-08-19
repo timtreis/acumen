@@ -77,25 +77,29 @@ def _planned(arm: str, split: str, task_id: str, rep: int = 1) -> PlannedRun:
     return PlannedRun(key=key, task=_task(task_id), model=MODEL, max_turns=1, max_usd=1.0)
 
 
-def _write_result(runs_root: Path, planned: PlannedRun, *, success: bool) -> None:
+def _write_result(runs_root: Path, planned: PlannedRun, *, success: bool, loaded: bool = True) -> None:
     directory = run_dir(runs_root, planned.key)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / RESULT_FILE).write_text(
-        json.dumps({"success": success, "skill_loaded": True, "model": MODEL, "answer": "x", "reason": "ok"})
+        json.dumps({"success": success, "skill_loaded": loaded, "model": MODEL, "answer": "x", "reason": "ok"})
     )
 
 
-def test_score_counts_only_complete_runs(tmp_path: Path) -> None:
-    passing = _planned("skill_v1", "test", "a")
-    failing = _planned("skill_v1", "test", "b")
-    missing = _planned("skill_v1", "test", "c")  # no result.json written
-    _write_result(tmp_path, passing, success=True)
-    _write_result(tmp_path, failing, success=False)
+def test_score_counts_passes_and_loads_over_complete_runs(tmp_path: Path) -> None:
+    passing = _planned("skill_v1", "test", "a")  # passed and loaded
+    failing = _planned("skill_v1", "test", "b")  # failed but loaded
+    noload = _planned("skill_v1", "test", "c")  # failed and never loaded
+    missing = _planned("skill_v1", "test", "d")  # no result.json written
+    _write_result(tmp_path, passing, success=True, loaded=True)
+    _write_result(tmp_path, failing, success=False, loaded=True)
+    _write_result(tmp_path, noload, success=False, loaded=False)
 
-    result = score(tmp_path, [passing, failing, missing])
+    result = score(tmp_path, [passing, failing, noload, missing])
 
-    assert (result.passed, result.total) == (1, 2)
-    assert result.rate == pytest.approx(0.5)
+    # pass and load are independent metrics: 1/3 passed, 2/3 loaded.
+    assert (result.passed, result.total, result.loaded) == (1, 3, 2)
+    assert result.rate == pytest.approx(1 / 3)
+    assert result.load_rate == pytest.approx(2 / 3)
 
 
 # ── Orchestration (agents mocked) ───────────────────────────────────────────────────────
@@ -192,6 +196,9 @@ def test_run_iteration_moves_the_held_out_score(tmp_path: Path, monkeypatch: pyt
     assert (result.improved_score.passed, result.improved_score.total) == (1, 1)
     assert result.baseline_train_score.passed == 1
     assert result.moved == 1
+    # Load rate plumbs through: the fake marks every run loaded, so both skill arms load 1/1.
+    assert result.baseline_score.loaded == 1 and result.improved_score.loaded == 1
+    assert result.load_moved == 0
     # No noskill arm was benched into runs_root by the fakes, so the floor reads as absent.
     assert result.noskill_score.total == 0
     assert result.rulebook.changed

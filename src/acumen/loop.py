@@ -84,15 +84,29 @@ class RulebookResult:
 
 @dataclass(frozen=True)
 class Score:
-    """A pass rate over a benchmarked slice."""
+    """Two independent success metrics over a benchmarked slice: passing, and loading the skill.
+
+    ``passed`` and ``loaded`` are orthogonal (a baseline run can pass without any skill; a skill run
+    can load the skill and still fail), so they are tracked separately — a skill that never loads is
+    a distinct, and prior, failure to one that loads and gets the wrong answer. The first real
+    measured loop run turned entirely on this distinction: every arm failed *because the skill never
+    loaded*, invisible on pass rate alone.
+    """
 
     passed: int
     total: int
+    #: How many of these runs actually loaded the skill under test (0 for the noskill arm).
+    loaded: int = 0
 
     @property
     def rate(self) -> float:
         """Pass rate in ``[0, 1]``; ``0.0`` when nothing was scored."""
         return self.passed / self.total if self.total else 0.0
+
+    @property
+    def load_rate(self) -> float:
+        """Skill-load rate in ``[0, 1]``; ``0.0`` when nothing was scored."""
+        return self.loaded / self.total if self.total else 0.0
 
 
 @dataclass(frozen=True)
@@ -119,20 +133,29 @@ class LoopResult:
 
     @property
     def moved(self) -> int:
-        """Change in held-out passes from baseline to improved (can be negative)."""
+        """Change in held-out passes from rulebook v1 to v2 (can be negative)."""
         return self.improved_score.passed - self.baseline_score.passed
+
+    @property
+    def load_moved(self) -> int:
+        """Change in held-out skill-load count from rulebook v1 to v2 (can be negative).
+
+        A rulebook edit aimed at the ``description`` moves loading, not passing — and a skill that
+        does not load cannot pass at all, so this is the earlier, often larger, signal of progress.
+        """
+        return self.improved_score.loaded - self.baseline_score.loaded
 
 
 # ── Scoring ────────────────────────────────────────────────────────────────────────────
 
 
 def score(runs_root: Path, planned: Sequence[PlannedRun]) -> Score:
-    """Read ``result.json`` for each planned run and tally the pass rate.
+    """Read ``result.json`` for each planned run and tally both success metrics: passes and loads.
 
     Reads from disk rather than trusting a ``run_matrix`` return, so a resumed pass (where the
     matrix ran nothing because everything was already complete) still scores correctly.
     """
-    passed = total = 0
+    passed = total = loaded = 0
     for item in planned:
         directory = run_dir(runs_root, item.key)
         if not is_complete(directory):
@@ -143,7 +166,8 @@ def score(runs_root: Path, planned: Sequence[PlannedRun]) -> Score:
             continue
         total += 1
         passed += bool(data.get("success"))
-    return Score(passed=passed, total=total)
+        loaded += bool(data.get("skill_loaded"))
+    return Score(passed=passed, total=total, loaded=loaded)
 
 
 # ── Benchmarking a skill (subscription auth, pass rate not dollars) ─────────────────────

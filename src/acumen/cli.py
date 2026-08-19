@@ -525,15 +525,26 @@ def _cmd_loop(args: argparse.Namespace) -> int:
     print(f"\nrulebook {result.baseline_version} -> {result.improved_version}")
     if ns.total:
         print(
-            f"  held-out (test): noskill {ns.passed}/{ns.total} ({ns.rate:.0%})  ->  "
+            f"  held-out PASS: noskill {ns.passed}/{ns.total} ({ns.rate:.0%})  ->  "
             f"skill {result.baseline_skill} {base.passed}/{base.total} ({base.rate:.0%})  ->  "
             f"skill {result.improved_skill} {imp.passed}/{imp.total} ({imp.rate:.0%})"
         )
-        print(f"  skill vs no-skill: {imp.passed - ns.passed:+d} passes;   rulebook v1 vs v2: {result.moved:+d} passes")
+        # Load rate is the earlier signal: a skill that never loads cannot pass. noskill never loads.
+        print(
+            f"  held-out LOAD:                       "
+            f"skill {result.baseline_skill} {base.loaded}/{base.total} ({base.load_rate:.0%})  ->  "
+            f"skill {result.improved_skill} {imp.loaded}/{imp.total} ({imp.load_rate:.0%})"
+        )
+        print(
+            f"  skill vs no-skill: {imp.passed - ns.passed:+d} passes;   "
+            f"rulebook v1 vs v2: {result.moved:+d} passes, {result.load_moved:+d} loads"
+        )
     else:
         print(
-            f"  held-out (test) pass rate: {base.passed}/{base.total} ({base.rate:.0%})  ->  "
-            f"{imp.passed}/{imp.total} ({imp.rate:.0%})   [moved {result.moved:+d} passes]"
+            f"  held-out (test): pass {base.passed}/{base.total} ({base.rate:.0%}) -> "
+            f"{imp.passed}/{imp.total} ({imp.rate:.0%}) [{result.moved:+d}];  "
+            f"load {base.loaded}/{base.total} ({base.load_rate:.0%}) -> "
+            f"{imp.loaded}/{imp.total} ({imp.load_rate:.0%}) [{result.load_moved:+d}]"
         )
     print(
         f"  baseline train pass rate:  {result.baseline_train_score.passed}/"

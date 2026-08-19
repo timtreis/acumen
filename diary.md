@@ -389,3 +389,19 @@ go, not the loop code. Saved to memory (`loop-needs-hard-tasks-on-a-loading-mode
 **Critical-path status:** machinery all built and proven (reliable bench, real task-gen, difficulty
 screening, noskill→skill loop metric); the measured run has pinned the remaining blocker to task
 calibration + reference-model choice rather than any code gap.
+
+---
+
+## 2026-08-19 — Skill-load rate as a first-class loop metric
+
+**Task (user steering).** The measured run failed invisibly on pass rate: every arm scored 0/1, but
+the reason (skill never loaded) was only findable by digging into result.json. Make skill-loaded a
+success metric the loop tracks and reports.
+
+**Change.** Extended `Score` (loop.py) with a `loaded` count and `load_rate`; `score()` now tallies
+`skill_loaded` alongside `success` (they are orthogonal — a run can load and still fail, or pass
+without a skill). Added `LoopResult.load_moved` (v1→v2 load delta) beside `moved`. The CLI loop
+report now prints a **held-out PASS** line and a **held-out LOAD** line (noskill → skill v1 → skill
+v2) and both deltas. Verified on the real closeness run (fully resumed, $0.00): PASS 0→0→0, LOAD
+0→0→0 — now visible that v2's description fix did not lift loading on haiku (which doesn't load
+skills), which is exactly why no rulebook change could move the score. Full suite 132 passed.
