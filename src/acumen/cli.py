@@ -11,6 +11,7 @@ from pathlib import Path
 
 from acumen.bench import build_matrix, pending, run_matrix, summarize
 from acumen.config import Config, ConfigError, load_config
+from acumen.difficulty import screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
 from acumen.improve import ImproveError, improve_skill
@@ -457,6 +458,30 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
     return 0
 
 
+def _cmd_screen(args: argparse.Namespace) -> int:
+    tasks = load_tasks(args.tasks)
+    diffs = screen(args.runs, tasks, splits=args.split or SPLITS)
+    if not diffs:
+        print(
+            f"no baseline runs found under {args.runs}/noskill — run `acumen bench --no-skill "
+            f"--tasks {args.tasks}` first, then screen",
+            file=sys.stderr,
+        )
+        return 2
+    print("baseline difficulty (a task with headroom is one the baseline does NOT already pass):")
+    print(f"  {'task':<44} {'split':<6} {'baseline':<10} stratum")
+    headroom: list[str] = []
+    for d in diffs:
+        print(f"  {d.task_id:<44} {d.split:<6} {d.passed}/{d.total} ({d.pass_rate:.0%})   {d.stratum}")
+        if d.has_headroom:
+            headroom.append(f"{d.task_id}[{d.split}]")
+    if headroom:
+        print(f"\ntasks with headroom for the loop: {', '.join(headroom)}")
+    else:
+        print("\nno task has headroom — the baseline already passes them all; the loop cannot show movement")
+    return 0
+
+
 def _cmd_loop(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     tasks = load_tasks(args.tasks)
@@ -694,6 +719,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_feedback_arg(tasks_cmd, extra=" (e.g. which functionality to skip or focus on)")
     _add_log_args(tasks_cmd)
     tasks_cmd.set_defaults(func=_cmd_tasks)
+
+    screen_cmd = sub.add_parser(
+        "screen",
+        help="report baseline (no-skill) pass rate per task as a difficulty signal (run bench --no-skill first)",
+    )
+    screen_cmd.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
+    screen_cmd.add_argument("--runs", type=Path, default=Path("runs"), help="root of the run tree")
+    screen_cmd.add_argument("--split", choices=SPLITS, action="append", help="restrict to a split (repeatable)")
+    screen_cmd.set_defaults(func=_cmd_screen)
 
     loop = sub.add_parser(
         "loop",
