@@ -85,14 +85,18 @@ class Inventory:
         path.write_text(json.dumps(self.as_dict(), indent=2))
 
     @classmethod
+    def from_dict(cls, data: dict[str, object]) -> Inventory:
+        """Rebuild an inventory from its :meth:`as_dict` form."""
+        return cls(
+            package=str(data["package"]),
+            version=str(data["version"]),
+            symbols=tuple(Symbol(s["qualname"], s["module"], s["kind"]) for s in data["symbols"]),  # type: ignore[index]
+        )
+
+    @classmethod
     def read(cls, path: Path) -> Inventory:
         """Load an inventory previously persisted by :meth:`write`."""
-        data = json.loads(path.read_text())
-        return cls(
-            package=data["package"],
-            version=data["version"],
-            symbols=tuple(Symbol(s["qualname"], s["module"], s["kind"]) for s in data["symbols"]),
-        )
+        return cls.from_dict(json.loads(path.read_text()))
 
 
 def _iter_public_modules(pkg: object, pkg_name: str) -> Iterable[str]:
@@ -167,6 +171,44 @@ def _installed_version(pkg_name: str) -> str:
         return version(pkg_name)
     except PackageNotFoundError:
         return "unknown"
+
+
+def inventory_in_venv(python: Path, pkg_name: str) -> Inventory:
+    """Build the inventory by introspecting the package in the **target venv**, not this process.
+
+    :func:`build_inventory` has to import the target package, which is installed in the target's
+    venv — never in the acumen process. So we shell out to that interpreter and run the
+    introspection there, printing the inventory as JSON we read back. The bootstrap loads this very
+    file *by path* (``importlib.util``) rather than ``import acumen.coverage``: the ``acumen``
+    package's ``__init__`` pulls in the agent SDK, which the target venv does not have, so importing
+    the package there would fail before reaching this stdlib-only module.
+
+    Raises
+    ------
+    CoverageError
+        If the subprocess fails or prints nothing parseable.
+    """
+    import subprocess
+
+    # Redirect stdout to stderr while importing the package and introspecting, so a package that
+    # prints a banner on import cannot corrupt the JSON — only the final dump reaches real stdout.
+    bootstrap = (
+        "import importlib.util,sys,json,contextlib\n"
+        f"spec=importlib.util.spec_from_file_location('_acumen_cov',{str(Path(__file__).resolve())!r})\n"
+        "m=importlib.util.module_from_spec(spec); sys.modules['_acumen_cov']=m; spec.loader.exec_module(m)\n"
+        "with contextlib.redirect_stdout(sys.stderr):\n"
+        f"    inv=m.build_inventory({pkg_name!r})\n"
+        "sys.stdout.write(json.dumps(inv.as_dict()))\n"
+    )
+    proc = subprocess.run([str(python), "-c", bootstrap], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise CoverageError(
+            f"introspecting {pkg_name!r} in the target venv failed ({proc.returncode}): {proc.stderr.strip()}"
+        )
+    try:
+        return Inventory.from_dict(json.loads(proc.stdout))
+    except (ValueError, KeyError) as err:
+        raise CoverageError(f"could not parse inventory JSON from the target venv: {err}") from err
 
 
 def _attr_chain(node: ast.AST) -> list[str] | None:

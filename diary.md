@@ -430,3 +430,34 @@ design comparison of built-vs-scope. Approved the plan: AST-over-persisted-scrip
 gr/pl/im/tl/read/datasets (+experimental). Denominator is the honest public surface (includes some
 builder plumbing like `gr.neighbors.*` and `assert_positive` — curation is target-specific tuning,
 deferred, not a mechanism gap). Next: P2b — persist one ground-truth script per task from task-gen.
+
+---
+
+## 2026-08-23 — P2 coverage: persist ground-truth scripts + `acumen coverage` (P2b/P2c)
+
+**P2b — attribution input.** Task-gen now persists one confirmation script per task so coverage has
+something to statically analyse. Prompt (`prompts.py`): added a `{scripts_dir}` placeholder and told
+the agent to save each task's exact script to `{out_dir}/scripts/<id>.py` (kept only for coverage;
+the benchmarked agent never sees them). `taskgen.py`: `_harvest_scripts` reads `work/scripts/*.py`
+keyed by task id (drops strays); `write_scripts` persists them; `_run_generation_agent` now returns
+`(tasks, scripts, result)`. Non-sharded writes `out/scripts/`; each shard caches to
+`shards_dir/<slug>/` and `merge_shards` collects them under the SAME namespaced id the tasks get
+(`<slug>__<id>.py`) so coverage keys line up with tasks.yaml ids. **Design call:** a missing/unsaved
+script is NOT a hard error — the script is a coverage-only artifact and discarding a valid task set
+(a full agent re-run) over it is the wrong trade; coverage degrades gracefully and the gap is
+surfaced instead.
+
+**P2c — `acumen coverage`.** Builds the inventory by shelling out to the **target venv** interpreter
+(`coverage.inventory_in_venv`) — the package imports only there, and the bootstrap loads coverage.py
+by path to dodge `acumen/__init__`'s SDK import; stdout is redirected during import so a package
+banner can't corrupt the JSON. Then reads `scripts/` beside tasks.yaml, measures, and prints
+coverage % + the uncovered generation queue (`--queue` emits bare names for `--feedback`). Names
+tasks with no script.
+
+**Result.** +13 tests (145 total), ruff clean. Real squidpy: inventory = 99 public symbols;
+`acumen coverage` runs end-to-end on the workspace (0/99 — the 3 pre-P2b tasks have no scripts,
+correctly flagged). Dropped ONE real hand-written squidpy script into a scripts dir → 4/99, with
+`datasets.merfish`, `gr.spatial_neighbors`, `gr.centrality_scores`, `pl.centrality_scores` all
+resolved correctly — the AST scan matches real squidpy call style. Not yet proven: a *live* task-gen
+agent actually saving the scripts (mock + prompt-render tests cover it structurally; a real run is
+an expensive separate step). Next: P3 warm cache.

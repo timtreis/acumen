@@ -138,7 +138,7 @@ def _fake_agent(fail_slugs: set[str], seen: dict[str, str]):
         seen[slug] = make_prompt(work_root / "work" / "tasks.yaml")
         if slug in fail_slugs:
             raise TaskGenError(f"boom in {slug}")
-        return [_task("t")], _FakeResult(cost=0.25, turns=2)
+        return [_task("t")], {"t": "import pkg\npkg.f()\n"}, _FakeResult(cost=0.25, turns=2)
 
     return run
 
@@ -175,6 +175,12 @@ def test_generate_tasks_sharded_merges_all_shards(tmp_path: Path, monkeypatch: p
     assert "docs/nb/a.ipynb" in seen["docs-nb-a"]
     assert "docs/nb/b.ipynb" in seen["docs-nb-b"]
     assert result.cost_usd == pytest.approx(0.75)
+    # Confirmation scripts are collected under the SAME namespaced id as the tasks, so coverage
+    # keys line up with tasks.yaml ids.
+    scripts = tmp_path / "tasks.yaml"
+    scripts = scripts.parent / "scripts"
+    assert {p.name for p in scripts.glob("*.py")} == {"docs-nb-a__t.py", "docs-nb-b__t.py", "docs-nb-c__t.py"}
+    assert "import pkg" in (scripts / "docs-nb-a__t.py").read_text()
 
 
 def test_generate_tasks_sharded_isolates_a_failed_shard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,3 +234,28 @@ def test_generate_tasks_sharded_refuses_existing_out_without_force(
     cfg = Config(repo=str(src), skill_name="pkg")
     with pytest.raises(TaskGenError, match="already exists"):
         asyncio.run(generate_tasks_sharded(cfg=cfg, target=_target(src), out_path=out, shards_dir=tmp_path / "shards"))
+
+
+# ── Confirmation-script persistence (P2 coverage input) ─────────────────────────────────
+
+
+def test_harvest_scripts_keeps_only_task_ids(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    (work / taskgen.SCRIPTS_DIRNAME).mkdir(parents=True)
+    (work / taskgen.SCRIPTS_DIRNAME / "keep.py").write_text("a = 1\n")
+    (work / taskgen.SCRIPTS_DIRNAME / "stray.py").write_text("b = 2\n")  # no matching task
+    harvested = taskgen._harvest_scripts(work, {"keep"})
+    assert harvested == {"keep": "a = 1\n"}
+
+
+def test_harvest_scripts_missing_dir(tmp_path: Path) -> None:
+    assert taskgen._harvest_scripts(tmp_path / "work", {"t"}) == {}
+
+
+def test_write_scripts_roundtrip_and_empty_noop(tmp_path: Path) -> None:
+    dest = tmp_path / "scripts"
+    taskgen.write_scripts({}, dest)
+    assert not dest.exists()  # empty -> no directory created
+    taskgen.write_scripts({"t1": "x = 1\n", "t2": "y = 2\n"}, dest)
+    assert (dest / "t1.py").read_text() == "x = 1\n"
+    assert (dest / "t2.py").read_text() == "y = 2\n"

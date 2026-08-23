@@ -52,6 +52,11 @@ from acumen.tasks import Task, TaskError, load_tasks, parse_tasks
 #: The filename the generation agent writes and we harvest from its work dir.
 TASKS_FILE = "tasks.yaml"
 
+#: Directory (under the tasks file's parent, and under each shard's cache) holding one
+#: ``<task_id>.py`` ground-truth confirmation script per task. Persisted so ``acumen coverage`` can
+#: see, by static analysis, which package symbols the benchmark exercises — see :mod:`acumen.coverage`.
+SCRIPTS_DIRNAME = "scripts"
+
 #: Basenames anywhere in the tree that are agent-facing skill/guidance artifacts. Reading any
 #: of these would let existing guidance bias which tasks the generator mines, so they are both
 #: stripped from the source copy the agent reads and denied by the guard hook.
@@ -337,7 +342,7 @@ async def generate_tasks(
         # The agent reads a copy of the source with skills/agent-guidance stripped, never the
         # real checkout — so existing skills cannot bias the tasks it generates.
         source_copy = build_filtered_source(target.src_dir, holder / "source")
-        generated, result = await _run_generation_agent(
+        generated, scripts, result = await _run_generation_agent(
             work_root=holder,
             source_copy=source_copy,
             target=target,
@@ -357,6 +362,7 @@ async def generate_tasks(
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(dump_tasks(generated))
+        write_scripts(scripts, out_path.parent / SCRIPTS_DIRNAME)
         return TaskGenResult(
             tasks=generated,
             out_path=out_path,
@@ -467,7 +473,44 @@ async def _run_generation_agent(
     if result.is_error:
         raise TaskGenError(f"the task-generation agent errored: {result.subtype} {result.errors or ''}".strip())
 
-    return _validate_generated(staged), result
+    tasks = _validate_generated(staged)
+    return tasks, _harvest_scripts(work, {task.id for task in tasks}), result
+
+
+def _harvest_scripts(work: Path, task_ids: set[str]) -> dict[str, str]:
+    """Read the per-task confirmation scripts the agent saved under ``work/scripts/``.
+
+    Returns ``{task_id: source}`` for every ``<id>.py`` whose stem is a real task id — stray files
+    are dropped, and a missing directory yields ``{}``. A missing or unreadable script for a task is
+    **not** an error: the script is a coverage-only artifact, and discarding a whole valid task set
+    over one unsaved script (a full agent re-run) is the wrong trade. Coverage degrades gracefully —
+    a task with no script simply contributes no covered symbols. Callers that want the gap visible
+    can compare ``task_ids`` against the returned keys.
+    """
+    scripts_dir = work / SCRIPTS_DIRNAME
+    if not scripts_dir.is_dir():
+        return {}
+    harvested: dict[str, str] = {}
+    for path in sorted(scripts_dir.glob("*.py")):
+        if path.stem in task_ids:
+            try:
+                harvested[path.stem] = path.read_text()
+            except OSError:
+                continue
+    return harvested
+
+
+def write_scripts(scripts: dict[str, str], dest: Path) -> None:
+    """Persist ``{task_id: source}`` as ``dest/<task_id>.py``, creating ``dest`` if needed.
+
+    A no-op when ``scripts`` is empty, so a generation that saved no scripts leaves no empty
+    directory behind.
+    """
+    if not scripts:
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for task_id, source in scripts.items():
+        (dest / f"{task_id}.py").write_text(source)
 
 
 # ── Sharded generation (one agent per notebook) ────────────────────────────────────────
@@ -573,15 +616,25 @@ def merge_shards(shards_dir: Path, out_path: Path) -> list[Task]:
         If no shard files hold any task.
     """
     merged: list[Task] = []
+    collected_scripts: dict[str, str] = {}
     for shard_file in sorted(shards_dir.glob("*.yaml")):
+        slug = shard_file.stem
         for task in load_tasks(shard_file):
-            merged.append(_namespace_task(task, shard_file.stem))
+            merged.append(_namespace_task(task, slug))
+        # Collect the shard's confirmation scripts under the SAME namespaced id the tasks get, so
+        # coverage keys (script stem) line up with the merged task ids. A shard with no scripts
+        # dir (an older run, or an agent that saved none) just contributes nothing here.
+        shard_scripts = shards_dir / slug
+        if shard_scripts.is_dir():
+            for script in sorted(shard_scripts.glob("*.py")):
+                collected_scripts[f"{slug}__{script.stem}"] = script.read_text()
     if not merged:
         raise TaskGenError(f"no tasks found across shards in {shards_dir} — nothing to merge")
     # Round-trip through dump + strict parse to enforce cross-shard uniqueness before writing.
     tasks = parse_tasks(yaml.safe_load(dump_tasks(merged)))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(dump_tasks(tasks))
+    write_scripts(collected_scripts, out_path.parent / SCRIPTS_DIRNAME)
     return tasks
 
 
@@ -723,7 +776,7 @@ async def generate_tasks_sharded(
                 work_root.mkdir(parents=True, exist_ok=True)
                 log = LiveLog.open(log_dir, f"tasks-{slug}", stream=stream) if log_dir is not None else None
                 try:
-                    tasks, result = await _run_generation_agent(
+                    tasks, scripts, result = await _run_generation_agent(
                         work_root=work_root,
                         source_copy=source_copy,
                         target=target,
@@ -744,6 +797,9 @@ async def generate_tasks_sharded(
                     )
                     # Only a fully validated shard is written, so a present file always parses.
                     shard_path.write_text(dump_tasks(tasks))
+                    # Persist this shard's confirmation scripts beside its yaml (under a dir named
+                    # for the slug) so the merge can namespace and collect them; survives resume.
+                    write_scripts(scripts, shards_dir / slug)
                     outcome = ShardOutcome(
                         notebook=notebook,
                         slug=slug,

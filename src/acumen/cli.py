@@ -11,6 +11,7 @@ from pathlib import Path
 
 from acumen.bench import build_matrix, pending, run_matrix, summarize
 from acumen.config import Config, ConfigError, load_config
+from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, measure_coverage
 from acumen.difficulty import screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
@@ -24,7 +25,7 @@ from acumen.runner import RunOutcome, StderrFilter
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
 from acumen.skills import SkillError, available_versions, latest_version, load_skill
-from acumen.taskgen import ShardOutcome, TaskGenError, generate_tasks, generate_tasks_sharded
+from acumen.taskgen import SCRIPTS_DIRNAME, ShardOutcome, TaskGenError, generate_tasks, generate_tasks_sharded
 from acumen.tasks import TaskError, load_tasks
 
 
@@ -482,6 +483,43 @@ def _cmd_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_coverage(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
+    target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
+    print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+
+    inventory = inventory_in_venv(target.python, target.pkg_name)
+
+    scripts_dir = args.scripts or (args.tasks.parent / SCRIPTS_DIRNAME)
+    scripts = load_scripts(scripts_dir)
+    tasks = load_tasks(args.tasks)
+    coverage = measure_coverage(inventory, scripts)
+
+    if args.queue:
+        # Machine-friendly: just the uncovered symbols, one per line, for feeding into a targeted
+        # generation run's --feedback.
+        for name in coverage.uncovered:
+            print(name)
+        return 0
+
+    covered_n = len(coverage.covered)
+    total_n = len(inventory.names)
+    print(f"\nAPI coverage of {inventory.package} {inventory.version}: {covered_n}/{total_n} ({coverage.rate:.0%})")
+    print(f"  ground-truth scripts read from {scripts_dir} ({len(scripts)} script(s), {len(tasks)} task(s))")
+    missing = [t.id for t in tasks if t.id not in scripts]
+    if missing:
+        print(f"  {len(missing)} task(s) have no confirmation script (contribute no coverage): {', '.join(missing)}")
+    if coverage.uncovered:
+        print(f"\nuncovered — the generation queue ({len(coverage.uncovered)} symbols):")
+        for name in coverage.uncovered:
+            print(f"  {name}")
+        print("\nfeed these to a targeted run: `acumen coverage --queue | ...` then `acumen tasks --feedback`")
+    else:
+        print("\nevery inventory symbol is exercised by at least one task — no generation queue")
+    return 0
+
+
 def _cmd_loop(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     tasks = load_tasks(args.tasks)
@@ -748,6 +786,20 @@ def build_parser() -> argparse.ArgumentParser:
     screen_cmd.add_argument("--split", choices=SPLITS, action="append", help="restrict to a split (repeatable)")
     screen_cmd.set_defaults(func=_cmd_screen)
 
+    coverage_cmd = sub.add_parser(
+        "coverage",
+        help="report which of the target's public API symbols the task set exercises (the rest are the queue)",
+    )
+    coverage_cmd.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
+    coverage_cmd.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
+    coverage_cmd.add_argument(
+        "--scripts", type=Path, help="dir of ground-truth scripts (default: 'scripts/' beside tasks.yaml)"
+    )
+    coverage_cmd.add_argument("--queue", action="store_true", help="print only the uncovered symbols, one per line")
+    coverage_cmd.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    coverage_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    coverage_cmd.set_defaults(func=_cmd_coverage)
+
     loop = sub.add_parser(
         "loop",
         help="PROTOTYPE: optimize the rulebook one iteration (draft->bench->improve rulebook->draft->bench)",
@@ -817,6 +869,7 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         TaskError,
         EnvError,
+        CoverageError,
         SkillError,
         DraftError,
         ImproveError,

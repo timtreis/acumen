@@ -411,9 +411,12 @@ analysis with two different correct answers — so a skill cannot pass by memori
 # Ground truth by execution
 
 Get each answer by actually DOING the analysis in the venv with `{python}` and reading the real
-result — never from a tutorial's printed output or the docs. Your scratch scripts stay in this
-working directory and are discarded; only the tasks written to `{out}` are kept, so the
-benchmarked agent must rederive everything from the goal alone. Before recording an answer,
+result — never from a tutorial's printed output or the docs. **For every task you record, save the
+exact script that produced its answer** to `{scripts_dir}/<id>.py`, where `<id>` is that task's
+`id`. These scripts are kept for one reason only — so acumen can see which package functions the
+benchmark exercises — and the benchmarked agent NEVER sees them, so nothing about them may leak
+into a task prompt; the agent still rederives everything from the goal alone. Any other scratch
+files are discarded. Before recording an answer,
 confirm the goal has exactly ONE defensible answer: if a competent analyst could read the goal
 two ways and get two results, tighten only the OUTPUT sentence (what to report, or its
 precision) until one answer stands — never by adding back instructions.
@@ -437,6 +440,9 @@ tasks:
 `id` must be unique across all tasks. Both `train` and `test` are required, each with a
 non-empty `prompt` and a non-empty `answer`. Do not add other keys unless you deliberately
 want a per-task override (`max_turns`, `max_usd`, or `model` are the only ones allowed).
+
+Also save each task's confirmation script to `{scripts_dir}/<id>.py` (create the directory). One
+script per task id, runnable in the venv, reproducing that task's answer.
 {feedback}
 # Before you finish
 
@@ -444,6 +450,7 @@ want a per-task override (`max_turns`, `max_usd`, or `model` are the only ones a
   from docs.
 - Every prompt is ONE paragraph: a goal in plain English, with no steps, no code, no package
   name, no version, no data description — only the goal and a precise statement of the output.
+- Every task has a matching `{scripts_dir}/<id>.py` that produced its answer.
 {coverage_check}
 - `{out}` exists and parses as the YAML above with at least one task.
 """
@@ -1017,6 +1024,7 @@ def taskgen_prompt(*, package: str, src: Path, python: Path, out: Path, feedback
         python=python,
         out=out,
         out_dir=out.parent,
+        scripts_dir=out.parent / "scripts",
         scope=TASKGEN_SCOPE_WHOLE,
         coverage_check=TASKGEN_CHECK_WHOLE,
         feedback=feedback_block(feedback),
@@ -1062,6 +1070,7 @@ def taskgen_shard_prompt(
         python=python,
         out=out,
         out_dir=out.parent,
+        scripts_dir=out.parent / "scripts",
         scope=TASKGEN_SCOPE_SHARD.format(notebook=notebook),
         coverage_check=TASKGEN_CHECK_SHARD.format(notebook=notebook),
         feedback=feedback_block(feedback),
