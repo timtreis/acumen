@@ -405,3 +405,28 @@ report now prints a **held-out PASS** line and a **held-out LOAD** line (noskill
 v2) and both deltas. Verified on the real closeness run (fully resumed, $0.00): PASS 0→0→0, LOAD
 0→0→0 — now visible that v2's description fix did not lift loading on haiku (which doesn't load
 skills), which is exactly why no rulebook change could move the score. Full suite 132 passed.
+
+---
+
+## 2026-08-23 — P2 coverage: inventory + reference scan (P2a)
+
+**Task (user).** Fully build P2 (coverage measurement) and P3 (warm dataset cache), after a
+design comparison of built-vs-scope. Approved the plan: AST-over-persisted-scripts attribution
+(not a runtime tracer), config-declared shared cache symlinks, pre-warm to kill the download race.
+
+**P2a — `coverage.py` (new) + `tests/test_coverage.py`.** Two pure pieces, no agent, no download:
+- `build_inventory(pkg)` introspects the *installed* package: walks the public module tree
+  (`pkgutil.walk_packages`, skipping any `_`-prefixed component), collects public functions/classes
+  whose `__module__` is in-package (excludes dependency re-exports), and records the **public
+  attribute path** a user writes (`squidpy.gr.spatial_neighbors`), not the private definition
+  module. JSON round-trips (`Inventory.write/read`) so the import-heavy scan runs once per version.
+- `scan_references(script, pkg)` resolves `import x as y` / `from x import f` against the package by
+  AST and returns the package-qualified names a script statically references — maximal attribute
+  chains only (the inner `sq.gr` module is passed through, not counted), conservative on anything
+  unresolvable. `measure_coverage` unions per-task refs ∩ inventory → `covered`; `uncovered` is the
+  generation queue.
+
+**Result.** 10 tests pass; ruff clean. Smoke on real squidpy: 99 public symbols across
+gr/pl/im/tl/read/datasets (+experimental). Denominator is the honest public surface (includes some
+builder plumbing like `gr.neighbors.*` and `assert_positive` — curation is target-specific tuning,
+deferred, not a mechanism gap). Next: P2b — persist one ground-truth script per task from task-gen.
