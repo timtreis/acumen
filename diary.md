@@ -546,3 +546,25 @@ the share is robustness not certainty). Real report on the squidpy workspace: ba
 21.5 KB, v2 34.2 KB via the skills-tree fallback — and the improve step made v2 *bigger* for no
 pass gain, which is precisely what this axis is for. Possible follow-up (not built): between-version
 dominance claims (does v2 dominate v1: no bigger AND better) — the frontier share covers it for now.
+
+---
+
+## 2026-08-26 — P4-full: per-model strata + headroom selection drives the loop
+
+**Change.** `difficulty.py`: `Difficulty.model` (None = pooled); `screen(by_model=True)` keeps each
+reference model's runs apart (reads the canonical `model` from result.json, falls back to the path
+slug) — pooling is only honest when one model ran, since a task hard for haiku and trivial for sonnet
+would read as merely "flaky". `select_headroom(diffs, tasks, split="test", models=cfg.models)` →
+`HeadroomSelection(selected, solved, unscreened)`: a task is kept when it has headroom for ANY
+configured model (helping one model moves the pooled score); a task never screened for that split is
+excluded, not guessed at. Judged on the **test** split — the held-out score is what the loop reports;
+train headroom can't show movement there.
+
+`loop.run_iteration(headroom_only=True, on_select=…)` narrows the task set BEFORE any agent runs
+(refuses with a clear `LoopError` if nothing can move, spending nothing); `LoopResult.selection`
+records the decision. `acumen loop --headroom`; `acumen screen --by-model` (model column).
+
+**Result.** +6 tests (164): by-model strata, selection semantics (any-model, split, unscreened),
+loop narrows to `hard` only with the callback firing at draft-count 0, refusal path spends nothing.
+Real `screen --by-model` on the squidpy workspace: `closeness_most_central[test]@haiku` is the one
+headroom task — matches the earlier diagnosis. Next: task mining (the corpus that makes P5 real).

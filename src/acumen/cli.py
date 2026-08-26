@@ -12,7 +12,7 @@ from pathlib import Path
 from acumen.bench import build_matrix, pending, run_matrix, summarize
 from acumen.config import Config, ConfigError, load_config
 from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, measure_coverage
-from acumen.difficulty import screen
+from acumen.difficulty import HeadroomSelection, screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
 from acumen.improve import ImproveError, improve_skill
@@ -466,7 +466,7 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
 
 def _cmd_screen(args: argparse.Namespace) -> int:
     tasks = load_tasks(args.tasks)
-    diffs = screen(args.runs, tasks, splits=args.split or SPLITS)
+    diffs = screen(args.runs, tasks, splits=args.split or SPLITS, by_model=args.by_model)
     if not diffs:
         print(
             f"no baseline runs found under {args.runs}/noskill — run `acumen bench --no-skill "
@@ -475,12 +475,14 @@ def _cmd_screen(args: argparse.Namespace) -> int:
         )
         return 2
     print("baseline difficulty (a task with headroom is one the baseline does NOT already pass):")
-    print(f"  {'task':<44} {'split':<6} {'baseline':<10} stratum")
+    model_col = f" {'model':<28}" if args.by_model else ""
+    print(f"  {'task':<44} {'split':<6}{model_col} {'baseline':<10} stratum")
     headroom: list[str] = []
     for d in diffs:
-        print(f"  {d.task_id:<44} {d.split:<6} {d.passed}/{d.total} ({d.pass_rate:.0%})   {d.stratum}")
+        model_cell = f" {d.model or '':<28}" if args.by_model else ""
+        print(f"  {d.task_id:<44} {d.split:<6}{model_cell} {d.passed}/{d.total} ({d.pass_rate:.0%})   {d.stratum}")
         if d.has_headroom:
-            headroom.append(f"{d.task_id}[{d.split}]")
+            headroom.append(f"{d.task_id}[{d.split}]" + (f"@{d.model}" if d.model else ""))
     if headroom:
         print(f"\ntasks with headroom for the loop: {', '.join(headroom)}")
     else:
@@ -586,6 +588,17 @@ def _cmd_loop(args: argparse.Namespace) -> int:
         k = outcome.key
         print(f"  {mark} {k.split}/{k.task_id}/rep_{k.rep} ({outcome.reason})", flush=True)
 
+    def on_select(selection: HeadroomSelection) -> None:
+        print(f"task selection — headroom on the test split against {', '.join(cfg.models)}:", flush=True)
+        print(f"  kept ({len(selection.selected)}): {', '.join(t.id for t in selection.selected) or '—'}")
+        if selection.solved:
+            print(f"  left out, baseline already solves ({len(selection.solved)}): {', '.join(selection.solved)}")
+        if selection.unscreened:
+            print(
+                f"  left out, never screened ({len(selection.unscreened)}): {', '.join(selection.unscreened)}"
+                "  (run `acumen bench --no-skill` on them first)"
+            )
+
     result = asyncio.run(
         run_iteration(
             cfg=cfg,
@@ -599,6 +612,8 @@ def _cmd_loop(args: argparse.Namespace) -> int:
             feedback=args.feedback,
             log_dir=args.log_dir,
             stream=args.stream,
+            headroom_only=args.headroom,
+            on_select=on_select,
             on_bench_done=on_done,
         )
     )
@@ -828,6 +843,9 @@ def build_parser() -> argparse.ArgumentParser:
     screen_cmd.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
     screen_cmd.add_argument("--runs", type=Path, default=Path("runs"), help="root of the run tree")
     screen_cmd.add_argument("--split", choices=SPLITS, action="append", help="restrict to a split (repeatable)")
+    screen_cmd.add_argument(
+        "--by-model", action="store_true", help="keep each reference model's runs apart instead of pooling them"
+    )
     screen_cmd.set_defaults(func=_cmd_screen)
 
     coverage_cmd = sub.add_parser(
@@ -868,6 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
     loop.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     loop.add_argument("--no-warm", action="store_true", help="skip pre-downloading datasets into the shared cache")
+    loop.add_argument(
+        "--headroom",
+        action="store_true",
+        help="score only tasks the no-skill baseline does not already pass on the test split "
+        "(per config model; needs prior `bench --no-skill` runs — unscreened tasks are left out)",
+    )
     _add_auth_arg(loop)
     _add_feedback_arg(loop)
     _add_log_args(loop)

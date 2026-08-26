@@ -20,7 +20,7 @@ from acumen import rulebooks as rb
 from acumen.bench import PlannedRun
 from acumen.config import Config
 from acumen.env import Target
-from acumen.loop import LoopResult, RulebookResult, run_iteration, score
+from acumen.loop import LoopError, LoopResult, RulebookResult, run_iteration, score
 from acumen.paths import RESULT_FILE, RunKey, run_dir
 from acumen.prompts import DRAFT_PROMPT, draft_prompt
 from acumen.rulebooks import RulebookError, seed_default, validate_rulebook
@@ -168,7 +168,15 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, cfg: Config, success_by_arm_
     monkeypatch.setattr(loop_mod, "improve_rulebook", fake_improve)
 
 
-def _run(tmp_path: Path, cfg: Config, calls: dict) -> LoopResult:
+def _run(
+    tmp_path: Path,
+    cfg: Config,
+    calls: dict,
+    *,
+    tasks: list[Task] | None = None,
+    headroom_only: bool = False,
+    on_select=None,
+) -> LoopResult:
     return asyncio.run(
         run_iteration(
             cfg=cfg,
@@ -176,10 +184,20 @@ def _run(tmp_path: Path, cfg: Config, calls: dict) -> LoopResult:
             skills_root=tmp_path / "skills",
             rulebooks_root=tmp_path / "rulebooks",
             runs_root=tmp_path / "runs",
-            tasks=[_task("only")],
+            tasks=tasks or [_task("only")],
             auth_mode="session",
+            headroom_only=headroom_only,
+            on_select=on_select,
         )
     )
+
+
+def _write_baseline(runs_root: Path, task_id: str, *, success: bool, split: str = "test") -> None:
+    """A prior `acumen bench --no-skill` result for one task, as headroom selection reads it."""
+    key = RunKey(arm="noskill", split=split, model=MODEL, task_id=task_id, rep=1)
+    directory = run_dir(runs_root, key)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / RESULT_FILE).write_text(json.dumps({"success": success, "skill_loaded": False, "model": MODEL}))
 
 
 def test_run_iteration_moves_the_held_out_score(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,6 +224,62 @@ def test_run_iteration_moves_the_held_out_score(tmp_path: Path, monkeypatch: pyt
     assert result.rulebook_diff.strip()  # a real unified diff was produced
     assert result.cost_usd == pytest.approx(0.4)  # 0.1 draft + 0.2 improve + 0.1 draft
     assert calls == {"draft": 2, "bench": 2, "improve": 1}
+
+
+def test_run_iteration_headroom_only_scores_just_the_tasks_the_baseline_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With --headroom the loop narrows to baseline-failed tasks BEFORE any agent runs.
+
+    'easy' is baseline-solved (no room to show movement), 'never' was never screened (cannot be
+    placed, so excluded rather than guessed at); only 'hard' is benched.
+    """
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    success = {("skill_v1", "train"): True, ("skill_v1", "test"): False, ("skill_v2", "test"): True}
+    _install_fakes(monkeypatch, cfg, success, calls)
+    runs = tmp_path / "runs"
+    _write_baseline(runs, "easy", success=True)
+    _write_baseline(runs, "hard", success=False)
+    seen: list[tuple[list[str], int]] = []
+
+    def on_select(selection) -> None:
+        # Recorded with the draft count at the time: the decision precedes every agent.
+        seen.append(([t.id for t in selection.selected], calls["draft"]))
+
+    result = _run(
+        tmp_path,
+        cfg,
+        calls,
+        tasks=[_task("easy"), _task("hard"), _task("never")],
+        headroom_only=True,
+        on_select=on_select,
+    )
+
+    assert seen == [(["hard"], 0)]
+    assert result.selection is not None
+    assert [t.id for t in result.selection.selected] == ["hard"]
+    assert result.selection.solved == ["easy"] and result.selection.unscreened == ["never"]
+    # Only the selected task was benched in either skill arm.
+    benched = {p.name for arm in ("skill_v1", "skill_v2") for p in (runs / arm / "test").rglob("rep_1")}
+    assert benched == {"rep_1"}
+    assert {p.parent.name for arm in ("skill_v1", "skill_v2") for p in (runs / arm / "test").rglob("rep_1")} == {"hard"}
+    assert (result.baseline_score.total, result.improved_score.total) == (1, 1)
+    # The floor is read for the same selected task only.
+    assert (result.noskill_score.passed, result.noskill_score.total) == (0, 1)
+
+
+def test_run_iteration_headroom_only_refuses_when_nothing_can_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    _install_fakes(monkeypatch, cfg, {}, calls)
+    _write_baseline(tmp_path / "runs", "easy", success=True)
+
+    with pytest.raises(LoopError, match="no task has headroom"):
+        _run(tmp_path, cfg, calls, tasks=[_task("easy"), _task("never")], headroom_only=True)
+    assert calls == {"draft": 0, "bench": 0, "improve": 0}  # refused before spending anything
 
 
 def test_run_iteration_resumes_without_respawning_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

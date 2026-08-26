@@ -44,6 +44,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from acumen import rulebooks as rb
 from acumen.bench import PlannedRun, build_matrix, pending, run_matrix
 from acumen.config import Config
+from acumen.difficulty import HeadroomSelection, screen, select_headroom
 from acumen.draft import draft_skill
 from acumen.env import AuthMode, Target, build_agent_env
 from acumen.improve import (
@@ -130,6 +131,9 @@ class LoopResult:
     rulebook: RulebookResult
     rulebook_diff: str
     cost_usd: float
+    #: How the task set was chosen when ``headroom_only`` was on: what was kept and what was left
+    #: out (baseline-solved, or never screened). ``None`` when every given task was used as-is.
+    selection: HeadroomSelection | None = None
 
     @property
     def moved(self) -> int:
@@ -472,6 +476,8 @@ async def run_iteration(
     feedback: str | None = None,
     log_dir: Path | None = None,
     stream: bool = False,
+    headroom_only: bool = False,
+    on_select: Callable[[HeadroomSelection], None] | None = None,
     on_bench_start: Callable[[PlannedRun], None] | None = None,
     on_bench_done: Callable[[RunOutcome], None] | None = None,
 ) -> LoopResult:
@@ -481,9 +487,42 @@ async def run_iteration(
     skill v1 -> bench both splits -> score test split -> improve rulebook to v2 from train evidence
     -> draft skill v2 -> bench test split -> score. Resumable: drafting and benching both skip work
     already on disk, so an interrupted run continues.
+
+    With ``headroom_only``, the task set is first narrowed to the tasks the no-skill baseline does
+    not already max out on the held-out split, judged per reference model against ``cfg.models``
+    (:func:`acumen.difficulty.select_headroom`). Tasks never screened are excluded, not guessed at:
+    scoring a rulebook on a task the baseline aces cannot show movement, so it is wasted agent
+    time and, worse, dilutes the signal. ``on_select`` sees the decision before any agent runs.
+
+    Raises
+    ------
+    LoopError
+        If ``headroom_only`` leaves no task to score on.
     """
     concurrency = max_concurrency or cfg.max_concurrency
     total_cost = 0.0
+
+    selection: HeadroomSelection | None = None
+    if headroom_only:
+        diffs = screen(runs_root, tasks, by_model=True)
+        selection = select_headroom(diffs, tasks, split="test", models=cfg.models)
+        if task_ids:
+            wanted = set(task_ids)
+            selection = HeadroomSelection(
+                selected=[t for t in selection.selected if t.id in wanted],
+                solved=selection.solved,
+                unscreened=selection.unscreened,
+            )
+        if on_select is not None:
+            on_select(selection)
+        if not selection.selected:
+            raise LoopError(
+                "no task has headroom for the loop: the baseline already passes every screened task "
+                f"({len(selection.solved)} solved) and {len(selection.unscreened)} were never screened — "
+                "run `acumen bench --no-skill` on more tasks, or generate harder ones"
+            )
+        tasks = selection.selected
+        task_ids = None
 
     baseline_version = rb.seed_default(rulebooks_root)
     if baseline_version != "v1":
@@ -594,4 +633,5 @@ async def run_iteration(
         rulebook=rulebook,
         rulebook_diff=diff,
         cost_usd=total_cost,
+        selection=selection,
     )
