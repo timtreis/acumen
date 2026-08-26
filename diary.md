@@ -604,3 +604,45 @@ neighbor of hippocampus = Pyramidal_layer; of fiber tract = Lateral_ventricle). 
 its confirmation script under the namespaced id — the **first live proof of P2b** — and
 `acumen coverage` now reads it: API coverage of squidpy 1.8.4.dev19+g52856c2de: 4/99 (4%)
   ground-truth scripts read from scripts (2 script(s), 1 task(s))
+
+---
+
+## 2026-08-27 — P5: cross-validation over tasks + the lockbox (the scientific core)
+
+**Corpus first.** Full `acumen mine` (6 default queries × ipynb/py, paced): 692 hits → **281 candidates**
+(263 new) / 411 rejected with reasons (146 library wrappers, 114 no real API symbol, 44 `_private`,
+37 unparseable, 37 duplicates, 21 target/submodule, 10 tests dirs, 1 too large). Launched the task-gen
+fleet on the **top 80 by API-symbol count** (13..3 symbols; 48 notebooks, 32 scripts) in the
+background — ~4 h at concurrency 2, resumable by shard file; first shard landed in 7 min ($0.66).
+
+**Why P5 exists.** The loop's train/test are *variants of the same task* — a within-task signal that
+says whether a skill memorised an answer, not whether the rulebook generalises to analyses it never
+saw; and every selection the loop makes on any score makes that score optimistic (selection leakage).
+
+**Change.**
+- `folds.py` (pure): `make_folds(ids, k, seed)` — ids sorted then seeded-shuffled and dealt
+  round-robin, so folds depend only on the id set + seed (file order can't move a task across a
+  boundary). `split_lockbox`, `write_lockbox` (**write-once**, manifest with sha256), `read_lockbox`
+  (verifies the digest — an edited lockbox is an error), `check_disjoint`.
+- **Guard generalised** (`improve.find_test_access`/`make_test_guard`): still denies every test split;
+  now also denies a held-out task's runs in **every** split (train runs name the task and its answer)
+  and any denied directory wholesale (the lockbox, all CV trees). `tests/test_guard.py` proves each
+  denial through structured paths AND shell tokens — the old test-split guard had no direct test.
+- `loop.run_cv_iteration`: shared parent draft+bench on the working tasks; per fold, the rulebook is
+  improved from the **optimize** tasks' evidence only (structural: `collect_train_runs` is given only
+  those tasks) behind the fold guard, a skill is drafted from it and scored on the **held-out** tasks;
+  the CV estimate is the mean held-out Δ over folds (+ spread). The version **carried forward** is
+  the **refit** on all working tasks (estimate out of sample, then fit on everything). Fold artifacts
+  live in their own `cv/vN/fold-i/` roots so the linear `vN` chains and the main run tree are
+  untouched; everything resumes by file presence. A **lockbox is required** unless explicitly waived
+  (`--no-lockbox`, and the report then says no generalisation claim is possible); the working set
+  is checked disjoint from it before any agent runs.
+- `acumen lockbox --tasks --fraction --seed` (writes `lockbox/` + `<tasks>.working.yaml`);
+  `acumen loop --cv K [--seed] [--lockbox DIR | --no-lockbox]` with a per-fold table, CV mean/spread,
+  and the within-task number labelled optimistic.
+
+**Result.** +13 tests (188). The CV loop tests assert the *boundary*: each fold's improve call got
+exactly the optimize task ids as evidence, the held-out ids in its guard, and the CV root + lockbox
+in its deny list; the refit got all tasks with nothing held out; fold scores cover exactly the
+held-out tasks; the linear chain holds only v1→v2. Refusals (no lockbox / overlap) spend nothing.
+Not yet run live — it needs the corpus (and P7 to score the lockbox). Next: P7-full.

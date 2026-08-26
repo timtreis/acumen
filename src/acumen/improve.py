@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -308,13 +309,49 @@ def _blocks(candidate: str, runs_root: Path) -> bool:
     return len(parts) >= 2 and parts[1] == _TEST_SPLIT
 
 
-def find_test_access(tool_name: str, tool_input: dict[str, Any], runs_root: Path) -> str | None:
-    """Return the first path in a tool call that reaches held-out test results, else ``None``.
+def _blocks_holdout(candidate: str, runs_root: Path, held_out_ids: frozenset[str], deny_dirs: Sequence[Path]) -> bool:
+    """Whether ``candidate`` reaches a held-out *task's* runs (any split) or a denied directory.
+
+    The CV and lockbox boundaries: a fold's improve agent may read the optimize tasks' train
+    runs and nothing about the held-out tasks — not even their train runs, which name the task
+    and its answer — and never the lockbox directory or any other CV fold's tree.
+    """
+    try:
+        resolved = Path(candidate).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for denied in deny_dirs:
+        if resolved == denied or denied in resolved.parents:
+            return True
+    if held_out_ids:
+        try:
+            rel = resolved.relative_to(runs_root)
+        except ValueError:
+            return False
+        parts = rel.parts
+        # runs_root/<arm>/<split>/<model>/<task_id>/... — the task is the fourth component.
+        return len(parts) >= 4 and parts[3] in held_out_ids
+    return False
+
+
+def find_test_access(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    runs_root: Path,
+    *,
+    held_out_ids: frozenset[str] = frozenset(),
+    deny_dirs: Sequence[Path] = (),
+) -> str | None:
+    """Return the first path in a tool call that reaches held-out material, else ``None``.
 
     Pure and side-effect free, so the enforcement can be exercised directly without
     standing up an agent. Checks the path-bearing tool_input keys, and — for shell tools —
     the whitespace/metacharacter-split tokens of the command, since a Bash call can name a
     path no structured field would.
+
+    Three things are held out, and all three are denied here: the **test split** of every task
+    (always), the **runs of held-out tasks** in any split (a CV fold's held-out set, when
+    ``held_out_ids`` is given), and any **denied directory** (the lockbox, other folds' trees).
 
     Parameters
     ----------
@@ -324,37 +361,53 @@ def find_test_access(tool_name: str, tool_input: dict[str, Any], runs_root: Path
         The tool's arguments.
     runs_root
         The project ``runs/`` root, resolved by the caller.
+    held_out_ids
+        Task ids whose runs are off-limits in every split.
+    deny_dirs
+        Resolved directories that are off-limits wholesale.
 
     Returns
     -------
-    The offending path string, or ``None`` if the call touches no test results.
+    The offending path string, or ``None`` if the call touches nothing held out.
     """
+
+    def hit(value: str) -> bool:
+        return _blocks(value, runs_root) or _blocks_holdout(value, runs_root, held_out_ids, deny_dirs)
+
     for key in _PATH_KEYS:
         value = tool_input.get(key)
-        if isinstance(value, str) and _blocks(value, runs_root):
+        if isinstance(value, str) and hit(value):
             return value
     command = tool_input.get("command")
     if isinstance(command, str):
         for token in command.translate(_SHELL_SPLIT).split():
             token = token.rstrip(",;")
-            if ("runs" in token or token.startswith("/") or token.startswith("~")) and _blocks(token, runs_root):
+            if ("runs" in token or token.startswith("/") or token.startswith("~") or deny_dirs) and hit(token):
                 return token
     return None
 
 
-def make_test_guard(runs_root: Path) -> HookMatcher:
-    """Build the ``PreToolUse`` hook that denies any access to held-out test results.
+def make_test_guard(
+    runs_root: Path, *, held_out_ids: Sequence[str] = (), deny_dirs: Sequence[Path] = ()
+) -> HookMatcher:
+    """Build the ``PreToolUse`` hook that denies any access to held-out material.
 
     ``matcher=None`` fires the hook for every tool. The hook resolves paths against the real
-    project ``runs/`` root, so it holds regardless of the agent's ``cwd``.
+    project ``runs/`` root, so it holds regardless of the agent's ``cwd``. With ``held_out_ids``
+    and ``deny_dirs`` it is the CV-fold / lockbox guard (see :func:`find_test_access`); without
+    them it is the plain test-split guard every improver has always run under.
     """
     root = runs_root.resolve()
+    ids = frozenset(held_out_ids)
+    denied = tuple(d.resolve() for d in deny_dirs)
 
     async def guard(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
         hit = find_test_access(
             input_data.get("tool_name", ""),
             input_data.get("tool_input", {}) or {},
             root,
+            held_out_ids=ids,
+            deny_dirs=denied,
         )
         if hit is None:
             return {}
@@ -363,8 +416,8 @@ def make_test_guard(runs_root: Path) -> HookMatcher:
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
-                    f"acumen blocks the improver from reading held-out test results ({hit}). "
-                    "Only train-split evidence is available to you."
+                    f"acumen blocks the improver from reading held-out material ({hit}). "
+                    "Only the train-split evidence of the tasks you were given is available to you."
                 ),
             }
         }

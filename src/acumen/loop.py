@@ -47,6 +47,7 @@ from acumen.config import Config
 from acumen.difficulty import HeadroomSelection, screen, select_headroom
 from acumen.draft import draft_skill
 from acumen.env import AuthMode, Target, build_agent_env
+from acumen.folds import Fold, FoldError, Lockbox, check_disjoint, make_folds, read_lockbox
 from acumen.improve import (
     _read_rationale,
     _write_material,
@@ -58,7 +59,7 @@ from acumen.paths import RESULT_FILE, SPLITS, Split, arm_name, is_complete, run_
 from acumen.procs import label_env, reap
 from acumen.prompts import rulebook_improve_prompt
 from acumen.runner import RunOutcome
-from acumen.skills import Skill, available_versions, load_skill
+from acumen.skills import Skill, available_versions, load_skill, version_number
 from acumen.tasks import Task
 
 
@@ -233,6 +234,8 @@ async def improve_rulebook(
     max_usd: float | None = None,
     feedback: str | None = None,
     log: LiveLog | None = None,
+    held_out_ids: Sequence[str] = (),
+    deny_dirs: Sequence[Path] = (),
 ) -> RulebookResult:
     """Improve the current rulebook into the next version from the drafted skill's train evidence.
 
@@ -240,6 +243,12 @@ async def improve_rulebook(
     held-out guard, but the artifact under edit is the rulebook (draft instructions), not the skill.
     ``benched_skill`` is the skill drafted from the parent rulebook and just benchmarked — its arm is
     where the train evidence lives.
+
+    The evidence is structurally limited to ``tasks``: only their train runs are collected and
+    written into the agent's work dir. For a CV fold, ``tasks`` is the optimize set and
+    ``held_out_ids`` the rest — the guard then also denies the held-out tasks' runs in *every*
+    split (their train runs name the task and its answer), and ``deny_dirs`` (the lockbox, the CV
+    trees) wholesale. Evidence and guard together are the fold boundary.
 
     Raises
     ------
@@ -306,8 +315,9 @@ async def improve_rulebook(
             setting_sources=["project"],
             permission_mode="bypassPermissions",
             system_prompt={"type": "preset", "preset": "claude_code"},
-            # Same held-out guard as the skill improver: the rulebook agent must not see test runs.
-            hooks={"PreToolUse": [make_test_guard(runs_root)]},
+            # Same held-out guard as the skill improver — plus, for a CV fold, the held-out tasks
+            # and the lockbox/CV trees. See make_test_guard.
+            hooks={"PreToolUse": [make_test_guard(runs_root, held_out_ids=held_out_ids, deny_dirs=deny_dirs)]},
         )
 
         result: ResultMessage | None = None
@@ -421,6 +431,8 @@ async def _ensure_rulebook(
     feedback: str | None,
     log_dir: Path | None,
     stream: bool,
+    deny_dirs: Sequence[Path] = (),
+    log_name: str = "loop-rulebook-v2",
 ) -> RulebookResult:
     """Improve the rulebook, or — on a resumed run — reconstruct the already-improved version.
 
@@ -443,7 +455,7 @@ async def _ensure_rulebook(
             n_train_runs=0,
             n_train_failures=0,
         )
-    log = LiveLog.open(log_dir, "loop-rulebook-v2", stream=stream) if log_dir is not None else None
+    log = LiveLog.open(log_dir, log_name, stream=stream) if log_dir is not None else None
     try:
         return await improve_rulebook(
             cfg=cfg,
@@ -456,6 +468,7 @@ async def _ensure_rulebook(
             parent_version=baseline_version,
             feedback=feedback,
             log=log,
+            deny_dirs=deny_dirs,
         )
     finally:
         if log is not None:
@@ -633,5 +646,367 @@ async def run_iteration(
         rulebook=rulebook,
         rulebook_diff=diff,
         cost_usd=total_cost,
+        selection=selection,
+    )
+
+
+# ── Cross-validated iteration (P5) ──────────────────────────────────────────────────────
+
+#: Subdirectory (under each of rulebooks/, skills/, runs/) holding per-fold artifacts. Kept apart
+#: from the linear ``vN`` chain: a fold's rulebook is an *estimate* of what the improvement
+#: procedure buys on unseen analyses, not a version anything is carried forward from.
+CV_DIRNAME = "cv"
+
+
+@dataclass(frozen=True)
+class FoldResult:
+    """One fold's estimate: improve on the optimize tasks, score on the tasks never seen."""
+
+    fold: Fold
+    #: Where the fold's rulebook / skill / runs live (each its own root, so the linear chains
+    #: and the main run tree are untouched).
+    rulebooks_root: Path
+    skills_root: Path
+    runs_root: Path
+    #: The main-tree skill (drafted from the parent rulebook) on this fold's held-out tasks.
+    baseline_held_out: Score
+    #: The skill drafted from the fold-improved rulebook on the same held-out tasks.
+    improved_held_out: Score
+    cost_usd: float
+
+    @property
+    def delta_rate(self) -> float:
+        """Held-out pass-rate change the fold's improvement bought on analyses it never saw."""
+        return self.improved_held_out.rate - self.baseline_held_out.rate
+
+    @property
+    def delta_load_rate(self) -> float:
+        """Held-out skill-load-rate change, the earlier signal (a skill that never loads cannot pass)."""
+        return self.improved_held_out.load_rate - self.baseline_held_out.load_rate
+
+
+@dataclass(frozen=True)
+class CVResult:
+    """One cross-validated rulebook iteration: k fold estimates plus the refit that is carried."""
+
+    baseline_version: str
+    baseline_skill: str
+    folds: list[FoldResult]
+    #: The rulebook improved on ALL working tasks — the version carried forward (``vN+1``). Its own
+    #: test-split score is within-task and therefore optimistic; the CV numbers are the estimate.
+    carried: RulebookResult
+    carried_skill: str
+    baseline_test: Score
+    carried_test: Score
+    noskill_score: Score
+    rulebook_diff: str
+    cost_usd: float
+    lockbox: Lockbox | None = None
+    selection: HeadroomSelection | None = None
+
+    @property
+    def cv_deltas(self) -> list[float]:
+        """Per-fold held-out pass-rate deltas."""
+        return [f.delta_rate for f in self.folds]
+
+    @property
+    def cv_mean_delta(self) -> float:
+        """Mean held-out pass-rate delta over folds — the cross-validated estimate of the gain."""
+        return sum(self.cv_deltas) / len(self.folds) if self.folds else 0.0
+
+    @property
+    def cv_spread(self) -> float:
+        """Max minus min fold delta: how much the estimate depends on which tasks were held out."""
+        return (max(self.cv_deltas) - min(self.cv_deltas)) if self.folds else 0.0
+
+    @property
+    def cv_mean_load_delta(self) -> float:
+        """Mean held-out skill-load-rate delta over folds."""
+        return sum(f.delta_load_rate for f in self.folds) / len(self.folds) if self.folds else 0.0
+
+
+def _subset(planned: Sequence[PlannedRun], task_ids: Sequence[str], split: Split) -> list[PlannedRun]:
+    wanted = set(task_ids)
+    return [p for p in planned if p.key.split == split and p.key.task_id in wanted]
+
+
+async def run_cv_iteration(
+    *,
+    cfg: Config,
+    target: Target,
+    skills_root: Path,
+    rulebooks_root: Path,
+    runs_root: Path,
+    tasks: Sequence[Task],
+    k: int = 3,
+    seed: int = 0,
+    lockbox_dir: Path | None = None,
+    allow_no_lockbox: bool = False,
+    auth_mode: AuthMode = "session",
+    max_concurrency: int | None = None,
+    task_ids: Sequence[str] | None = None,
+    feedback: str | None = None,
+    log_dir: Path | None = None,
+    stream: bool = False,
+    headroom_only: bool = False,
+    on_select: Callable[[HeadroomSelection], None] | None = None,
+    on_fold: Callable[[FoldResult], None] | None = None,
+    on_bench_start: Callable[[PlannedRun], None] | None = None,
+    on_bench_done: Callable[[RunOutcome], None] | None = None,
+) -> CVResult:
+    """One rulebook iteration scored by cross-validation over tasks, behind a lockbox.
+
+    The honest form of :func:`run_iteration`. That one scores a rulebook on the *test variants* of
+    the very tasks whose train runs improved it — a within-task signal that says whether a skill
+    memorised an answer, not whether the rulebook generalises. Here the working tasks are split
+    into ``k`` folds (:func:`acumen.folds.make_folds`) and, per fold, the rulebook is improved from
+    the **optimize** tasks' evidence only and scored on the **held-out** tasks — analyses the
+    improve agent never saw. The boundary is structural twice over: the evidence written into the
+    agent's work dir is collected for the optimize tasks alone, and a ``PreToolUse`` guard denies
+    the held-out tasks' runs in every split, the lockbox, and every CV tree. The mean held-out delta
+    over folds is the cross-validated estimate of what one improvement buys.
+
+    The version **carried forward** is not a fold's rulebook but the refit: improved on all working
+    tasks (the standard CV recipe — estimate the procedure out of sample, then fit on everything).
+    Its own within-task test score is reported too, labelled as optimistic.
+
+    A **lockbox** (:mod:`acumen.folds`) is required unless ``allow_no_lockbox``: every selection the
+    loop makes is on CV scores, so those are optimistic by construction; the lockbox is the set no
+    selection ever touched, scored once at the end by the outer loop. The working set is checked to
+    be disjoint from it, and its directory is denied to every improve agent.
+
+    Everything is resumable by file presence: shared v1 draft and bench, each fold's rulebook v2 /
+    skill v1 / held-out runs, and the refit.
+
+    Raises
+    ------
+    LoopError
+        If the lockbox is missing (and not explicitly waived) or overlaps the working set, the fold
+        request is degenerate, or ``headroom_only`` leaves nothing to score on.
+    """
+    concurrency = max_concurrency or cfg.max_concurrency
+    total_cost = 0.0
+
+    selection: HeadroomSelection | None = None
+    if headroom_only:
+        diffs = screen(runs_root, tasks, by_model=True)
+        selection = select_headroom(diffs, tasks, split="test", models=cfg.models)
+        if on_select is not None:
+            on_select(selection)
+        if not selection.selected:
+            raise LoopError("no task has headroom for the loop — run `acumen bench --no-skill` on more tasks first")
+        tasks = selection.selected
+    if task_ids:
+        wanted = set(task_ids)
+        tasks = [t for t in tasks if t.id in wanted]
+
+    lockbox: Lockbox | None = None
+    if lockbox_dir is not None:
+        try:
+            lockbox = read_lockbox(lockbox_dir)
+            check_disjoint(tasks, lockbox)
+        except FoldError as err:
+            raise LoopError(str(err)) from err
+    elif not allow_no_lockbox:
+        raise LoopError(
+            "no lockbox given — every score the loop selects on is optimistic, and the lockbox is the one "
+            "that is not. Run `acumen lockbox` first and pass --lockbox, or pass --no-lockbox to proceed "
+            "without a final held-out set (the result then cannot be trusted as a generalisation claim)"
+        )
+    try:
+        folds = make_folds([t.id for t in tasks], k, seed)
+    except FoldError as err:
+        raise LoopError(str(err)) from err
+    by_id = {t.id: t for t in tasks}
+
+    # Shared: the parent rulebook, the skill drafted from it, and its bench on every working task.
+    baseline_version = rb.seed_default(rulebooks_root)
+    parent_version = rb.latest_version(rulebooks_root) or baseline_version
+    parent_text = rb.load_rulebook(rulebooks_root, parent_version).text
+    carried_version = rb.next_version(rulebooks_root)
+    parent_skill_version = f"v{version_number(parent_version)}"
+    skill_parent, cost = await _ensure_skill(
+        cfg=cfg,
+        target=target,
+        skills_root=skills_root,
+        rulebook_text=parent_text,
+        expect_version=parent_skill_version,
+        auth_mode=auth_mode,
+        rationale=f"drafted from rulebook {parent_version}",
+        log_dir=log_dir,
+        stream=stream,
+    )
+    total_cost += cost
+    planned_parent = await _bench(
+        cfg=cfg,
+        target=target,
+        skill=skill_parent,
+        tasks=tasks,
+        runs_root=runs_root,
+        splits=SPLITS,
+        auth_mode=auth_mode,
+        task_ids=None,
+        max_concurrency=concurrency,
+        on_start=on_bench_start,
+        on_done=on_bench_done,
+    )
+    baseline_test = score(runs_root, [p for p in planned_parent if p.key.split == "test"])
+
+    # Denied to every improve agent this iteration: the lockbox and all CV trees (a fold must not
+    # read another fold's held-out runs, which may be its own optimize tasks' answers).
+    cv_root = runs_root / CV_DIRNAME
+    deny_dirs: list[Path] = [cv_root]
+    if lockbox is not None:
+        deny_dirs.append(lockbox.directory)
+
+    fold_results: list[FoldResult] = []
+    for fold in folds:
+        tag = f"{carried_version}/fold-{fold.index}"
+        fold_rb_root = rulebooks_root / CV_DIRNAME / carried_version / f"fold-{fold.index}"
+        fold_sk_root = skills_root / CV_DIRNAME / carried_version / f"fold-{fold.index}"
+        fold_runs_root = cv_root / carried_version / f"fold-{fold.index}"
+        optimize_tasks = [by_id[t] for t in fold.optimize]
+        held_out_tasks = [by_id[t] for t in fold.held_out]
+        fold_cost = 0.0
+
+        # The fold's own rulebook chain starts from a copy of the parent, so the fold's improve
+        # writes v2 there and the linear main chain is untouched.
+        if "v1" not in rb.available_versions(fold_rb_root):
+            rb.write_rulebook(
+                fold_rb_root,
+                "v1",
+                parent_text,
+                parent=parent_version,
+                rationale=f"copy of rulebook {parent_version} — the parent of fold {fold.index}'s estimate",
+            )
+        if rb.latest_version(fold_rb_root) == "v1":
+            log = LiveLog.open(log_dir, f"loop-rulebook-{tag}", stream=stream) if log_dir is not None else None
+            try:
+                improved = await improve_rulebook(
+                    cfg=cfg,
+                    target=target,
+                    rulebooks_root=fold_rb_root,
+                    runs_root=runs_root,
+                    benched_skill=skill_parent,
+                    tasks=optimize_tasks,
+                    auth_mode=auth_mode,
+                    parent_version="v1",
+                    feedback=feedback,
+                    log=log,
+                    held_out_ids=fold.held_out,
+                    deny_dirs=deny_dirs,
+                )
+            finally:
+                if log is not None:
+                    log.close()
+            fold_cost += improved.cost_usd
+        fold_text = rb.load_rulebook(fold_rb_root, "v2").text
+
+        fold_skill, cost = await _ensure_skill(
+            cfg=cfg,
+            target=target,
+            skills_root=fold_sk_root,
+            rulebook_text=fold_text,
+            expect_version="v1",
+            auth_mode=auth_mode,
+            rationale=f"drafted from fold rulebook {tag}",
+            log_dir=log_dir,
+            stream=stream,
+        )
+        fold_cost += cost
+        planned_fold = await _bench(
+            cfg=cfg,
+            target=target,
+            skill=fold_skill,
+            tasks=held_out_tasks,
+            runs_root=fold_runs_root,
+            splits=["test"],
+            auth_mode=auth_mode,
+            task_ids=None,
+            max_concurrency=concurrency,
+            on_start=on_bench_start,
+            on_done=on_bench_done,
+        )
+        result = FoldResult(
+            fold=fold,
+            rulebooks_root=fold_rb_root,
+            skills_root=fold_sk_root,
+            runs_root=fold_runs_root,
+            baseline_held_out=score(runs_root, _subset(planned_parent, fold.held_out, "test")),
+            improved_held_out=score(fold_runs_root, planned_fold),
+            cost_usd=fold_cost,
+        )
+        total_cost += fold_cost
+        fold_results.append(result)
+        if on_fold is not None:
+            on_fold(result)
+
+    # The refit: improve on every working task's evidence — the version carried forward.
+    carried = await _ensure_rulebook(
+        cfg=cfg,
+        target=target,
+        rulebooks_root=rulebooks_root,
+        runs_root=runs_root,
+        benched_skill=skill_parent,
+        tasks=tasks,
+        baseline_version=parent_version,
+        baseline_text=parent_text,
+        auth_mode=auth_mode,
+        feedback=feedback,
+        log_dir=log_dir,
+        stream=stream,
+        deny_dirs=deny_dirs,
+        log_name=f"loop-rulebook-{carried_version}",
+    )
+    total_cost += carried.cost_usd
+    carried_text = rb.load_rulebook(rulebooks_root, carried.version).text
+    skill_carried, cost = await _ensure_skill(
+        cfg=cfg,
+        target=target,
+        skills_root=skills_root,
+        rulebook_text=carried_text,
+        expect_version=f"v{version_number(carried.version)}",
+        auth_mode=auth_mode,
+        rationale=f"drafted from rulebook {carried.version}",
+        log_dir=log_dir,
+        stream=stream,
+    )
+    total_cost += cost
+    planned_carried = await _bench(
+        cfg=cfg,
+        target=target,
+        skill=skill_carried,
+        tasks=tasks,
+        runs_root=runs_root,
+        splits=["test"],
+        auth_mode=auth_mode,
+        task_ids=None,
+        max_concurrency=concurrency,
+        on_start=on_bench_start,
+        on_done=on_bench_done,
+    )
+    carried_test = score(runs_root, planned_carried)
+    noskill_score = score(runs_root, build_matrix(cfg, tasks, skill=None, splits=["test"]))
+
+    diff = "".join(
+        difflib.unified_diff(
+            parent_text.splitlines(keepends=True),
+            carried_text.splitlines(keepends=True),
+            fromfile=f"rulebook {parent_version}",
+            tofile=f"rulebook {carried.version}",
+        )
+    )
+    return CVResult(
+        baseline_version=parent_version,
+        baseline_skill=skill_parent.version,
+        folds=fold_results,
+        carried=carried,
+        carried_skill=skill_carried.version,
+        baseline_test=baseline_test,
+        carried_test=carried_test,
+        noskill_score=noskill_score,
+        rulebook_diff=diff,
+        cost_usd=total_cost,
+        lockbox=lockbox,
         selection=selection,
     )

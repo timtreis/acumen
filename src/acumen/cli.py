@@ -15,9 +15,10 @@ from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, meas
 from acumen.difficulty import HeadroomSelection, screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
+from acumen.folds import FoldError, split_lockbox, write_lockbox
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
-from acumen.loop import LoopError, run_iteration
+from acumen.loop import CVResult, LoopError, run_cv_iteration, run_iteration
 from acumen.mining import (
     SEARCH_INTERVAL_S,
     MineResult,
@@ -36,7 +37,14 @@ from acumen.runner import RunOutcome, StderrFilter
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
 from acumen.skills import SkillError, available_versions, latest_version, load_skill
-from acumen.taskgen import SCRIPTS_DIRNAME, ShardOutcome, TaskGenError, generate_tasks, generate_tasks_sharded
+from acumen.taskgen import (
+    SCRIPTS_DIRNAME,
+    ShardOutcome,
+    TaskGenError,
+    dump_tasks,
+    generate_tasks,
+    generate_tasks_sharded,
+)
 from acumen.tasks import TaskError, load_tasks
 from acumen.warm import WarmOutcome, collect_dataset_calls, warm_datasets
 
@@ -625,6 +633,57 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lockbox(args: argparse.Namespace) -> int:
+    tasks = load_tasks(args.tasks)
+    working_path = args.working or args.tasks.with_name(f"{args.tasks.stem}.working.yaml")
+    if working_path.exists() and not args.force:
+        print(f"{working_path} already exists — pass --force to overwrite it", file=sys.stderr)
+        return 2
+    working_ids, lock_ids = split_lockbox([t.id for t in tasks], args.fraction, args.seed)
+    by_id = {t.id: t for t in tasks}
+    try:
+        box = write_lockbox(
+            args.out, [by_id[i] for i in lock_ids], seed=args.seed, fraction=args.fraction, dump=dump_tasks
+        )
+    except FoldError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    working_path.write_text(dump_tasks([by_id[i] for i in working_ids]))
+    print(f"lockbox: {len(lock_ids)} task(s) held back → {box.directory.resolve()}  ({box.digest[:19]}…)")
+    print(f"working: {len(working_ids)} task(s) → {working_path.resolve()}")
+    print("\nnext: `acumen loop --cv K --tasks <working> --lockbox <lockbox>`; the lockbox is scored once, at the end")
+    return 0
+
+
+def _print_cv(result: CVResult) -> None:
+    """The CV report: per-fold held-out deltas, their mean and spread, then the carried version."""
+    print(f"\nrulebook {result.baseline_version} -> {result.carried.version}  (cross-validated, k={len(result.folds)})")
+    print(f"  {'fold':<6} {'held-out tasks':<16} {'baseline':<12} {'improved':<12} {'Δ pass':<9} Δ load")
+    for f in result.folds:
+        b, i = f.baseline_held_out, f.improved_held_out
+        print(
+            f"  {f.fold.index:<6} {len(f.fold.held_out):<16} {b.passed}/{b.total} ({b.rate:.0%})   "
+            f"{i.passed}/{i.total} ({i.rate:.0%})   {f.delta_rate:+.0%}     {f.delta_load_rate:+.0%}"
+        )
+    print(
+        f"  CV estimate: Δ pass {result.cv_mean_delta:+.1%} (spread {result.cv_spread:.1%} across folds); "
+        f"Δ load {result.cv_mean_load_delta:+.1%}"
+    )
+    bt, ct, ns = result.baseline_test, result.carried_test, result.noskill_score
+    within = (
+        f"skill {result.baseline_skill} {bt.passed}/{bt.total} -> skill {result.carried_skill} {ct.passed}/{ct.total}"
+    )
+    floor = f"noskill {ns.passed}/{ns.total} -> " if ns.total else ""
+    print(f"  within-task test (optimistic, not the estimate): {floor}{within}")
+    if result.lockbox is not None:
+        print(f"  lockbox: {len(result.lockbox.task_ids)} task(s) untouched — scored only by `acumen loop` at the end")
+    else:
+        print("  no lockbox: this run cannot support a generalisation claim", file=sys.stderr)
+    if not result.carried.changed:
+        print("  note: the refit left the rulebook unchanged", file=sys.stderr)
+    print(f"  rulebook rationale: {result.carried.rationale}")
+
+
 def _cmd_loop(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     tasks = load_tasks(args.tasks)
@@ -659,6 +718,40 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 f"  left out, never screened ({len(selection.unscreened)}): {', '.join(selection.unscreened)}"
                 "  (run `acumen bench --no-skill` on them first)"
             )
+
+    if args.cv:
+        cv = asyncio.run(
+            run_cv_iteration(
+                cfg=cfg,
+                target=target,
+                skills_root=args.skills,
+                rulebooks_root=args.rulebooks,
+                runs_root=args.runs,
+                tasks=tasks,
+                k=args.cv,
+                seed=args.seed,
+                lockbox_dir=None if args.no_lockbox else args.lockbox,
+                allow_no_lockbox=args.no_lockbox,
+                auth_mode=auth_mode,
+                task_ids=args.task,
+                feedback=args.feedback,
+                log_dir=args.log_dir,
+                stream=args.stream,
+                headroom_only=args.headroom,
+                on_select=on_select,
+                on_fold=lambda f: print(
+                    f"  fold {f.fold.index}: held-out {f.improved_held_out.passed}/{f.improved_held_out.total} "
+                    f"vs baseline {f.baseline_held_out.passed}/{f.baseline_held_out.total} ({f.delta_rate:+.0%})",
+                    flush=True,
+                ),
+                on_bench_done=on_done,
+            )
+        )
+        _print_cv(cv)
+        diff_path = args.rulebooks / cv.carried.version / f"from-{cv.baseline_version}.diff"
+        diff_path.write_text(cv.rulebook_diff)
+        print(f"  rulebook diff: {diff_path}")
+        return 0
 
     result = asyncio.run(
         run_iteration(
@@ -939,6 +1032,20 @@ def build_parser() -> argparse.ArgumentParser:
     warm_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     warm_cmd.set_defaults(func=_cmd_warm)
 
+    lockbox_cmd = sub.add_parser(
+        "lockbox",
+        help="hold back a fraction of tasks, written once, never optimized on, scored once at the very end",
+    )
+    lockbox_cmd.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="the full task set")
+    lockbox_cmd.add_argument("--out", type=Path, default=Path("lockbox"), help="lockbox directory to create")
+    lockbox_cmd.add_argument(
+        "--working", type=Path, help="where to write the remaining (working) tasks (default: <tasks>.working.yaml)"
+    )
+    lockbox_cmd.add_argument("--fraction", type=float, default=0.2, help="fraction of tasks to hold back (0.2)")
+    lockbox_cmd.add_argument("--seed", type=int, default=0, help="selection seed (default 0)")
+    lockbox_cmd.add_argument("--force", action="store_true", help="overwrite an existing working file")
+    lockbox_cmd.set_defaults(func=_cmd_lockbox)
+
     mine = sub.add_parser(
         "mine",
         help="harvest real analyses that use the target (GitHub code search, given web pages) into candidate scripts",
@@ -984,6 +1091,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="score only tasks the no-skill baseline does not already pass on the test split "
         "(per config model; needs prior `bench --no-skill` runs — unscreened tasks are left out)",
+    )
+    loop.add_argument(
+        "--cv",
+        type=int,
+        metavar="K",
+        help="cross-validate over tasks with K folds: improve on K-1 folds, score on the held-out fold, "
+        "report the mean; carry forward the refit on all tasks",
+    )
+    loop.add_argument("--seed", type=int, default=0, help="fold assignment seed (default 0)")
+    loop.add_argument("--lockbox", type=Path, default=Path("lockbox"), help="lockbox dir from `acumen lockbox`")
+    loop.add_argument(
+        "--no-lockbox", action="store_true", help="run --cv without a lockbox (no generalisation claim possible)"
     )
     _add_auth_arg(loop)
     _add_feedback_arg(loop)
@@ -1043,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
         EnvError,
         CoverageError,
         MiningError,
+        FoldError,
         SkillError,
         DraftError,
         ImproveError,

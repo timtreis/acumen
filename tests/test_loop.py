@@ -20,11 +20,13 @@ from acumen import rulebooks as rb
 from acumen.bench import PlannedRun
 from acumen.config import Config
 from acumen.env import Target
-from acumen.loop import LoopError, LoopResult, RulebookResult, run_iteration, score
+from acumen.folds import write_lockbox
+from acumen.loop import LoopError, LoopResult, RulebookResult, run_cv_iteration, run_iteration, score
 from acumen.paths import RESULT_FILE, RunKey, run_dir
 from acumen.prompts import DRAFT_PROMPT, draft_prompt
 from acumen.rulebooks import RulebookError, seed_default, validate_rulebook
 from acumen.skills import load_skill, next_version
+from acumen.taskgen import dump_tasks
 from acumen.tasks import Task, TaskSplit
 
 MODEL = "claude-haiku-4-5-20251001"
@@ -280,6 +282,130 @@ def test_run_iteration_headroom_only_refuses_when_nothing_can_move(
     with pytest.raises(LoopError, match="no task has headroom"):
         _run(tmp_path, cfg, calls, tasks=[_task("easy"), _task("never")], headroom_only=True)
     assert calls == {"draft": 0, "bench": 0, "improve": 0}  # refused before spending anything
+
+
+# ── Cross-validated iteration (P5) ──────────────────────────────────────────────────────
+
+
+def _install_cv_fakes(monkeypatch: pytest.MonkeyPatch, cfg: Config, calls: dict, improves: list[dict]) -> None:
+    """Fakes for the CV loop: every skill fails held-out tests until improved, then passes.
+
+    ``improves`` records each improve invocation's boundary kwargs, which is what the tests assert
+    on: the CV guarantee is *what evidence the agent was given and what it was denied*.
+    """
+
+    async def fake_draft(*, cfg, target, skills_root, rulebook, **_):
+        calls["draft"] += 1
+        version = next_version(skills_root)
+        _write_skill(skills_root, version, cfg.skill_name)
+        return SimpleNamespace(skill=load_skill(skills_root, version, expect_name=cfg.skill_name), cost_usd=0.1)
+
+    async def fake_run_matrix(planned, *, runs_root, **_):
+        calls["bench"] += 1
+        for item in planned:
+            # Main tree: parent skill passes train, fails test. CV trees: fold skills pass.
+            in_cv = loop_mod.CV_DIRNAME in runs_root.parts
+            _write_result(runs_root, item, success=in_cv or item.key.split == "train")
+        return []
+
+    async def fake_improve(*, rulebooks_root, parent_version, tasks, held_out_ids=(), deny_dirs=(), **_):
+        calls["improve"] += 1
+        improves.append(
+            {
+                "root": rulebooks_root,
+                "tasks": sorted(t.id for t in tasks),
+                "held_out": tuple(held_out_ids),
+                "deny": [Path(d) for d in deny_dirs],
+            }
+        )
+        text = rb.load_rulebook(rulebooks_root, parent_version).text + f"\n<!-- {rulebooks_root.name} -->\n"
+        new = rb.next_version(rulebooks_root)
+        rb.write_rulebook(rulebooks_root, new, text, parent=parent_version, rationale="tweak")
+        return RulebookResult(
+            version=new,
+            parent=parent_version,
+            path=rb.rulebook_dir(rulebooks_root, new) / rb.RULEBOOK_FILE,
+            rationale="tweak",
+            changed=True,
+            cost_usd=0.2,
+            turns=1,
+            n_train_runs=len(tasks),
+            n_train_failures=0,
+        )
+
+    monkeypatch.setattr(loop_mod, "draft_skill", fake_draft)
+    monkeypatch.setattr(loop_mod, "run_matrix", fake_run_matrix)
+    monkeypatch.setattr(loop_mod, "improve_rulebook", fake_improve)
+
+
+def _cv(tmp_path: Path, cfg: Config, tasks: list[Task], **kw):
+    return asyncio.run(
+        run_cv_iteration(
+            cfg=cfg,
+            target=_target(tmp_path),
+            skills_root=tmp_path / "skills",
+            rulebooks_root=tmp_path / "rulebooks",
+            runs_root=tmp_path / "runs",
+            tasks=tasks,
+            auth_mode="session",
+            **kw,
+        )
+    )
+
+
+def test_cv_iteration_holds_out_structurally_and_estimates_over_folds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    improves: list[dict] = []
+    _install_cv_fakes(monkeypatch, cfg, calls, improves)
+    tasks = [_task(t) for t in ("a", "b", "c", "d")]
+    lockbox = write_lockbox(tmp_path / "lockbox", [_task("z")], seed=0, fraction=0.2, dump=dump_tasks)
+
+    result = _cv(tmp_path, cfg, tasks, k=2, seed=0, lockbox_dir=lockbox.directory)
+
+    # Two fold estimates plus the refit: three improves, each with the right boundary.
+    assert calls["improve"] == 3 and len(result.folds) == 2
+    fold_calls = [c for c in improves if loop_mod.CV_DIRNAME in c["root"].parts]
+    refit = [c for c in improves if loop_mod.CV_DIRNAME not in c["root"].parts]
+    assert len(fold_calls) == 2 and len(refit) == 1
+    for fold, call in zip(result.folds, fold_calls, strict=True):
+        assert call["tasks"] == sorted(fold.fold.optimize)  # evidence: optimize tasks only
+        assert set(call["held_out"]) == set(fold.fold.held_out)  # guard: held-out tasks denied
+        assert set(fold.fold.optimize) | set(fold.fold.held_out) == {"a", "b", "c", "d"}
+        assert any(d.name == loop_mod.CV_DIRNAME for d in call["deny"])  # other folds' trees denied
+        assert lockbox.directory in call["deny"]  # the lockbox denied
+    assert refit[0]["tasks"] == ["a", "b", "c", "d"] and refit[0]["held_out"] == ()
+
+    # Each fold is scored on exactly its held-out tasks; baseline fails them, the fold skill passes.
+    for f in result.folds:
+        assert f.improved_held_out.total == len(f.fold.held_out) == f.baseline_held_out.total
+        assert f.baseline_held_out.passed == 0 and f.improved_held_out.passed == len(f.fold.held_out)
+        assert f.delta_rate == 1.0
+    assert result.cv_mean_delta == 1.0 and result.cv_spread == 0.0
+    # Fold artifacts live in their own roots; the linear chains hold only v1 -> v2 (the refit).
+    assert rb.available_versions(tmp_path / "rulebooks") == ["v1", "v2"]
+    assert result.carried.version == "v2" and result.carried_skill == "v2"
+    assert (tmp_path / "rulebooks" / loop_mod.CV_DIRNAME / "v2" / "fold-1" / "v2").is_dir()
+    assert result.lockbox == lockbox
+
+
+def test_cv_iteration_requires_a_lockbox_and_refuses_overlap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    _install_cv_fakes(monkeypatch, cfg, calls, [])
+    tasks = [_task(t) for t in ("a", "b", "c", "d")]
+
+    with pytest.raises(LoopError, match="no lockbox"):
+        _cv(tmp_path, cfg, tasks, k=2)
+    lockbox = write_lockbox(tmp_path / "lockbox", [_task("a")], seed=0, fraction=0.2, dump=dump_tasks)
+    with pytest.raises(LoopError, match="in the lockbox"):
+        _cv(tmp_path, cfg, tasks, k=2, lockbox_dir=lockbox.directory)
+    assert calls == {"draft": 0, "bench": 0, "improve": 0}  # refused before any agent ran
+    # Explicitly waiving the lockbox is allowed, and recorded as absent.
+    result = _cv(tmp_path, cfg, tasks, k=2, allow_no_lockbox=True)
+    assert result.lockbox is None and len(result.folds) == 2
 
 
 def test_run_iteration_resumes_without_respawning_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
