@@ -27,6 +27,7 @@ from acumen.ship import ShipError, ship_skill
 from acumen.skills import SkillError, available_versions, latest_version, load_skill
 from acumen.taskgen import SCRIPTS_DIRNAME, ShardOutcome, TaskGenError, generate_tasks, generate_tasks_sharded
 from acumen.tasks import TaskError, load_tasks
+from acumen.warm import WarmOutcome, collect_dataset_calls, warm_datasets
 
 
 def _add_bench_args(parser: argparse.ArgumentParser) -> None:
@@ -44,6 +45,7 @@ def _add_bench_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     parser.add_argument("--keep-sandboxes", action="store_true", help="leave run sandboxes on disk")
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    parser.add_argument("--no-warm", action="store_true", help="skip pre-downloading datasets into the shared cache")
     parser.add_argument("--skills", type=Path, default=Path("skills"), help="root of the skill tree")
     parser.add_argument("--dry-run", action="store_true", help="print the matrix and exit without running agents")
 
@@ -207,6 +209,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]} (venv {target.venv_dir})", flush=True)
+    if cfg.dataset_cache_dirs and not args.no_warm:
+        _warm_cache(cfg, target, args.tasks)
 
     print(f"running {len(todo)} runs, up to {cfg.max_concurrency} at a time:", flush=True)
     progress = _Progress(len(todo))
@@ -224,6 +228,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             on_start=progress.on_start,
             on_done=progress.on_done,
             env_passthrough=cfg.env_passthrough,
+            dataset_cache_dirs=cfg.dataset_cache_dirs,
         )
     )
 
@@ -483,6 +488,43 @@ def _cmd_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _warm_cache(cfg: Config, target: Target, tasks_path: Path) -> list[WarmOutcome]:
+    """Pre-download every dataset the tasks' ground-truth scripts load into the shared cache.
+
+    Runs before a benchmark matrix so concurrent runs never race the same first download. Only
+    meaningful when ``config.dataset_cache_dirs`` is set — without the sandbox symlinks the shared
+    cache is never seen — so callers gate on that. Reads the same ``scripts/`` dir as coverage.
+    """
+    scripts = load_scripts(tasks_path.parent / SCRIPTS_DIRNAME)
+    calls = collect_dataset_calls(scripts, target.pkg_name)
+    if not calls:
+        print(f"warm: no dataset loader calls found in {tasks_path.parent / SCRIPTS_DIRNAME} — nothing to pre-download")
+        return []
+    print(f"warming {len(calls)} dataset(s) into {target.datasets_dir} (sequential, once per target):", flush=True)
+
+    def on_done(outcome: WarmOutcome) -> None:
+        mark = "✓" if outcome.ok else "✗"
+        print(f"  {mark} {outcome.call.source}" + (f"  ({outcome.error})" if not outcome.ok else ""), flush=True)
+
+    return warm_datasets(target.python, target.pkg_name, calls, target.datasets_dir, on_done=on_done)
+
+
+def _cmd_warm(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
+    target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
+    print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+    if not cfg.dataset_cache_dirs:
+        print(
+            "warning: config has no 'dataset_cache_dirs' — sandboxes will not see the shared cache, so "
+            "warming it has no effect on benchmark runs. Set e.g. dataset_cache_dirs: [data, cache].",
+            file=sys.stderr,
+        )
+    outcomes = _warm_cache(cfg, target, args.tasks)
+    failed = [o for o in outcomes if not o.ok]
+    return 1 if failed else 0
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
@@ -531,6 +573,8 @@ def _cmd_loop(args: argparse.Namespace) -> int:
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+    if cfg.dataset_cache_dirs and not args.no_warm:
+        _warm_cache(cfg, target, args.tasks)
     print(
         "PROTOTYPE loop: draft skill from rulebook v1 -> bench -> improve rulebook to v2 -> "
         "draft -> bench. This runs several agents and full benchmark passes; it is slow.",
@@ -800,6 +844,16 @@ def build_parser() -> argparse.ArgumentParser:
     coverage_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     coverage_cmd.set_defaults(func=_cmd_coverage)
 
+    warm_cmd = sub.add_parser(
+        "warm",
+        help="pre-download the datasets the tasks' ground-truth scripts load into the shared per-target cache",
+    )
+    warm_cmd.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
+    warm_cmd.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
+    warm_cmd.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    warm_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    warm_cmd.set_defaults(func=_cmd_warm)
+
     loop = sub.add_parser(
         "loop",
         help="PROTOTYPE: optimize the rulebook one iteration (draft->bench->improve rulebook->draft->bench)",
@@ -813,6 +867,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--max-concurrency", type=int, help="override config max_concurrency")
     loop.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
     loop.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    loop.add_argument("--no-warm", action="store_true", help="skip pre-downloading datasets into the shared cache")
     _add_auth_arg(loop)
     _add_feedback_arg(loop)
     _add_log_args(loop)

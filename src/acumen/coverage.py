@@ -32,7 +32,7 @@ import importlib
 import inspect
 import json
 import pkgutil
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -211,7 +211,7 @@ def inventory_in_venv(python: Path, pkg_name: str) -> Inventory:
         raise CoverageError(f"could not parse inventory JSON from the target venv: {err}") from err
 
 
-def _attr_chain(node: ast.AST) -> list[str] | None:
+def attr_chain(node: ast.AST) -> list[str] | None:
     """Flatten an attribute/name access into its dotted parts, or ``None`` if it isn't one.
 
     ``sq.gr.spatial_neighbors`` -> ``["sq", "gr", "spatial_neighbors"]``. A subscript or call in
@@ -251,29 +251,7 @@ def scan_references(script: str, pkg_name: str) -> set[str]:
         If ``script`` is not parseable Python — the caller decides whether that invalidates a task.
     """
     tree = ast.parse(script)
-    module_aliases: dict[str, str] = {}  # local module alias -> real dotted module
-    symbol_aliases: dict[str, str] = {}  # local symbol name -> real dotted qualname
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name != pkg_name and not alias.name.startswith(f"{pkg_name}."):
-                    continue
-                if alias.asname:
-                    # `import squidpy.gr as g` binds `g` to the submodule.
-                    module_aliases[alias.asname] = alias.name
-                else:
-                    # `import squidpy.gr` (no asname) binds only the *top* name (`squidpy`),
-                    # which refers to the package root — not the dotted submodule.
-                    top = alias.name.split(".", 1)[0]
-                    module_aliases[top] = top
-        elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if node.level == 0 and (mod == pkg_name or mod.startswith(f"{pkg_name}.")):
-                for alias in node.names:
-                    if alias.name == "*":
-                        continue
-                    symbol_aliases[alias.asname or alias.name] = f"{mod}.{alias.name}"
+    aliases = collect_aliases(tree, pkg_name)
 
     # Only the *maximal* attribute chain is a reference: in `sq.gr.spatial_neighbors`, the inner
     # `sq.gr` is a module we pass through, not a symbol. Skip any node that is itself the `.value`
@@ -289,18 +267,68 @@ def scan_references(script: str, pkg_name: str) -> set[str]:
             continue
         if id(node) in inner:
             continue
-        parts = _attr_chain(node)
+        parts = attr_chain(node)
         if not parts:
             continue
-        head = parts[0]
-        if head in module_aliases:
-            # `sq` + [`gr`, `spatial_neighbors`] -> `squidpy` + `.gr.spatial_neighbors`
-            resolved = ".".join([module_aliases[head], *parts[1:]])
-            if len(parts) > 1:
-                referenced.add(resolved)
-        elif head in symbol_aliases and len(parts) == 1:
-            referenced.add(symbol_aliases[head])
+        resolved = resolve_parts(parts, aliases)
+        if resolved is not None:
+            referenced.add(resolved)
     return referenced
+
+
+@dataclass(frozen=True)
+class Aliases:
+    """How a script's local names map onto a package: the import bindings the resolver needs."""
+
+    #: local module alias -> real dotted module (``sq`` -> ``squidpy``, ``g`` -> ``squidpy.gr``)
+    modules: Mapping[str, str]
+    #: local symbol name -> real dotted qualname (``sn`` -> ``squidpy.gr.spatial_neighbors``)
+    symbols: Mapping[str, str]
+
+
+def collect_aliases(tree: ast.AST, pkg_name: str) -> Aliases:
+    """Gather the import bindings of ``pkg_name`` in a parsed script.
+
+    Handles the two forms a script uses: ``import squidpy as sq`` / ``import squidpy.gr [as g]``
+    bind a *module* alias; ``from squidpy.gr import spatial_neighbors [as sn]`` binds a *symbol*
+    alias. ``import squidpy.gr`` with no ``as`` binds only the top name (``squidpy``) — Python
+    semantics, and the resolver relies on it. Star imports are ignored (unresolvable statically).
+    """
+    modules: dict[str, str] = {}
+    symbols: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name != pkg_name and not alias.name.startswith(f"{pkg_name}."):
+                    continue
+                if alias.asname:
+                    modules[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".", 1)[0]
+                    modules[top] = top
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if node.level == 0 and (mod == pkg_name or mod.startswith(f"{pkg_name}.")):
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    symbols[alias.asname or alias.name] = f"{mod}.{alias.name}"
+    return Aliases(modules=modules, symbols=symbols)
+
+
+def resolve_parts(parts: Sequence[str], aliases: Aliases) -> str | None:
+    """Resolve a dotted access (``["sq", "gr", "f"]``) to a package-qualified name, or ``None``.
+
+    A module alias head needs at least one more part (a bare ``sq`` names the package, not a
+    symbol); a symbol alias must be a bare name (``sn``, not ``sn.something``). Anything else is
+    not a reference into the package.
+    """
+    head = parts[0]
+    if head in aliases.modules:
+        return ".".join([aliases.modules[head], *parts[1:]]) if len(parts) > 1 else None
+    if head in aliases.symbols and len(parts) == 1:
+        return aliases.symbols[head]
+    return None
 
 
 @dataclass(frozen=True)

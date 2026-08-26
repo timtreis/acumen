@@ -206,6 +206,7 @@ async def _bench(
             on_start=on_start,
             on_done=on_done,
             env_passthrough=cfg.env_passthrough,
+            dataset_cache_dirs=cfg.dataset_cache_dirs,
         )
     return planned
 

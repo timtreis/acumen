@@ -461,3 +461,35 @@ correctly flagged). Dropped ONE real hand-written squidpy script into a scripts 
 resolved correctly — the AST scan matches real squidpy call style. Not yet proven: a *live* task-gen
 agent actually saving the scripts (mock + prompt-render tests cover it structurally; a real run is
 an expensive separate step). Next: P3 warm cache.
+
+---
+
+## 2026-08-26 — Master build plan + P3 warm dataset cache
+
+**Plan (user: "build EVERYTHING else").** Wrote `tasks/build-plan.md`: sequential build, one module
+at a time — P3 warm cache → P6-full rulebook → leanness axis → P4-full strata → task mining
+(GitHub + web, full) → P5 CV+lockbox → P7-full loop. Decisions: fable authors the mechanical
+modules, the CV/lockbox core stays on a strong model. Key ordering insight: P5 over 3 tasks is
+meaningless, so the mining corpus comes before P5.
+
+**P3 — mechanism.** Root cause confirmed in the source: squidpy writes to
+`scanpy.settings.datasetdir`, default `data` — **cwd-relative**, so every throwaway sandbox
+re-downloaded. Fix is a filesystem redirect of acumen-owned paths, not an env change:
+- `config.dataset_cache_dirs` (validated single path components; squidpy: `[data, cache]`).
+- `Target.datasets_dir` = `<cache entry>/datasets` (shares the venv's cache key; dropped on
+  `--refresh-target`).
+- `sandbox.link_dataset_cache`: symlink `<root>/<name>` → shared dir, both arms identically
+  (parity), env scrub / HOME / XDG untouched. Threaded cli → run_matrix → run_once → sandbox
+  exactly like `env_passthrough`.
+- `warm.py`: lifts `sq.datasets.X(<literals>)` calls out of the persisted P2 scripts by AST
+  (reuses coverage's alias resolver — extracted `collect_aliases`/`resolve_parts`/`attr_chain` so
+  there is ONE resolver), dedupes, and runs each once **sequentially** in the target venv with the
+  shared dir as cwd. Kills the concurrent first-download race. Computed args are skipped, never
+  guessed. `acumen warm`; auto-warm before the matrix in `bench`/`loop` (`--no-warm` to skip),
+  gated on `dataset_cache_dirs` being set (otherwise sandboxes can't see the shared dir anyway).
+
+**Result.** +7 tests (152 total) incl. a real subprocess warm against a fake package; ruff clean.
+Real squidpy: `acumen warm` downloaded `merfish.h5ad` (49 MB) into
+`~/.cache/acumen/squidpy-*/datasets/data/anndata/` in 45 s; re-run 9.8 s with no download. Not yet
+proven: a full bench pass reading through the symlink (unit test covers the link; the loader's
+cwd-relative resolution is what the real warm proved). Next: P6-full rulebook artifact.

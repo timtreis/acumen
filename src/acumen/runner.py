@@ -261,6 +261,7 @@ async def run_once(
     keep_sandbox: bool = False,
     stderr: Callable[[str], None] | None = None,
     env_passthrough: Sequence[str] | None = None,
+    dataset_cache_dirs: Sequence[str] | None = None,
 ) -> RunOutcome:
     """Execute one benchmark run end to end and write its ``result.json``.
 
@@ -298,6 +299,9 @@ async def run_once(
     env_passthrough
         Extra environment variable names to carry into the sandbox on top of the built-in
         allowlist (the operator's ``config.env_passthrough``).
+    dataset_cache_dirs
+        cwd-relative dataset directories to symlink to the target's shared dataset cache
+        (``config.dataset_cache_dirs``), identically in both arms.
 
     Returns
     -------
@@ -322,6 +326,7 @@ async def run_once(
         keep=keep_sandbox,
         skill=skill,
         env_passthrough=env_passthrough,
+        dataset_cache_dirs=dataset_cache_dirs,
     ) as box:
         prompt = benchmark_prompt(
             split.prompt,

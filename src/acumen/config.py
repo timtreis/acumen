@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from .paths import PathError, slugify
+from .paths import PathError, is_safe_component, slugify
 
 
 class ConfigError(ValueError):
@@ -38,6 +38,13 @@ class Config:
     #: (``OMP_NUM_THREADS``, ``R_HOME``, a service key) must name it here. Values are passed
     #: through verbatim; only list what the package genuinely needs.
     env_passthrough: list[str] = field(default_factory=list)
+    #: Names of directories, relative to an agent's working directory, into which the target
+    #: package downloads example data (squidpy/scanpy: ``data`` for ``datasets.*``, ``cache``
+    #: for cached reads — both are cwd-relative defaults). Each is symlinked from every sandbox
+    #: to one persistent, shared directory under the target cache, so a dataset is downloaded
+    #: once per target rather than once per run. Datasets are read-only inputs, so sharing them
+    #: leaks no run state; the env scrub is untouched. Empty (the default) shares nothing.
+    dataset_cache_dirs: list[str] = field(default_factory=list)
     models: list[str] = field(default_factory=lambda: ["claude-opus-5"])
     n_replicates: int = 3
     max_concurrency: int = 4
@@ -65,6 +72,7 @@ _KNOWN = {
     "python",
     "submodules",
     "env_passthrough",
+    "dataset_cache_dirs",
     "models",
     "n_replicates",
     "max_concurrency",
@@ -175,6 +183,15 @@ def parse_config(raw: Any) -> Config:
     if len(set(models)) != len(models):
         raise ConfigError(f"'models' contains duplicates: {models}")
 
+    dataset_cache_dirs = _str_list(raw, "dataset_cache_dirs", [])
+    for name in dataset_cache_dirs:
+        # Each entry becomes a symlink directly under the sandbox root, so it must be a single
+        # plain path component — a nested or parent-relative path would escape the sandbox.
+        if not is_safe_component(name):
+            raise ConfigError(
+                f"'dataset_cache_dirs' entry {name!r} must be a single directory name (letters, digits, '.', '_', '-')"
+            )
+
     default_model = models[0]
     return Config(
         repo=repo,
@@ -184,6 +201,7 @@ def parse_config(raw: Any) -> Config:
         python=_optional_str(raw, "python", "3.12"),
         submodules=_bool(raw, "submodules", True),
         env_passthrough=_str_list(raw, "env_passthrough", []),
+        dataset_cache_dirs=dataset_cache_dirs,
         models=models,
         n_replicates=_positive_int(raw, "n_replicates", 3),
         max_concurrency=_positive_int(raw, "max_concurrency", 4),

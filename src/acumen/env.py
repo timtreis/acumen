@@ -94,6 +94,17 @@ class Target:
         """The ``pkg_version`` string recorded in ``result.json``, e.g. ``numpy 2.1.0``."""
         return f"{self.pkg_name} {self.pkg_version}"
 
+    @property
+    def datasets_dir(self) -> Path:
+        """The persistent, shared dataset cache for this target: ``<cache entry>/datasets``.
+
+        Sandboxes symlink their ``config.dataset_cache_dirs`` here (see
+        :func:`acumen.sandbox.link_dataset_cache`) and ``acumen warm`` pre-populates it, so a
+        dataset is downloaded once per target rather than once per run. Lives beside the venv,
+        so it shares the venv's (repo, ref) cache key and is dropped with it on ``--refresh-target``.
+        """
+        return self.venv_dir.parent / "datasets"
+
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> str:
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)

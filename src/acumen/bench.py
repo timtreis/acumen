@@ -114,6 +114,7 @@ async def run_matrix(
     on_start: Callable[[PlannedRun], None] | None = None,
     on_done: Callable[[RunOutcome], None] | None = None,
     env_passthrough: Sequence[str] | None = None,
+    dataset_cache_dirs: Sequence[str] | None = None,
 ) -> list[RunOutcome]:
     """Run planned runs concurrently, bounded by ``max_concurrency``.
 
@@ -157,6 +158,9 @@ async def run_matrix(
     env_passthrough
         Extra environment variable names each run carries into its sandbox on top of the
         built-in allowlist (the operator's ``config.env_passthrough``).
+    dataset_cache_dirs
+        cwd-relative dataset directories each sandbox symlinks to the target's shared dataset
+        cache (``config.dataset_cache_dirs``).
 
     Returns
     -------
@@ -184,6 +188,7 @@ async def run_matrix(
                 keep_sandbox=keep_sandbox,
                 stderr=stderr,
                 env_passthrough=env_passthrough,
+                dataset_cache_dirs=dataset_cache_dirs,
             )
             if on_done is not None:
                 on_done(outcome)
