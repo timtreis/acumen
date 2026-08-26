@@ -483,6 +483,32 @@ API; other agents cover those, and overlap wastes the benchmark. If the notebook
 single analysis, ONE well-formed task is the correct output — do not pad it to hit a count.
 """
 
+#: The mined-analysis scope block: cover ONE real-world script someone published. Filled into
+#: ``{scope}`` by :func:`taskgen_mined_prompt`. The one thing that differs from a tutorial shard is
+#: data: the script's own inputs are not here, so every task must be re-grounded on a bundled
+#: dataset — the same analysis, on data the benchmarked agent can actually load.
+TASKGEN_SCOPE_MINED = """\
+# Your one analysis — a real script someone published using this package
+
+You are generating tasks from exactly ONE real-world analysis: `{analysis}`, mined from a public
+repository or page (its origin is in the header comment). Read it in full, and the package source
+it exercises. It shows what a practitioner actually did with the package — that is the unit of
+work this benchmark should measure. Write a task for each genuinely DIFFERENT analysis it
+performs — usually one to three; if it performs one, ONE task is the correct output.
+
+The script's OWN DATA IS NOT AVAILABLE here, and you must not try to fetch it. Re-ground every
+task on one of the package's bundled example datasets (see its `datasets` module) that fits the
+analysis — the same analysis, on data you can actually run. If no bundled dataset can support an
+analysis, skip that analysis rather than invent one. Do NOT wander beyond what this script
+demonstrates; other agents cover other analyses, and overlap wastes the benchmark.
+"""
+
+#: The mined-analysis coverage bullet, paired with :data:`TASKGEN_SCOPE_MINED`.
+TASKGEN_CHECK_MINED = (
+    "- Every task is grounded in an analysis actually performed in `{analysis}`, re-run on a\n"
+    "  bundled dataset — you did not wander, and you did not invent an analysis the script lacks."
+)
+
 #: The whole-package "before you finish" coverage bullet, paired with :data:`TASKGEN_SCOPE_WHOLE`.
 TASKGEN_CHECK_WHOLE = "- You wrote at least one task per tutorial, and covered all of them."
 
@@ -1073,6 +1099,35 @@ def taskgen_shard_prompt(
         scripts_dir=out.parent / "scripts",
         scope=TASKGEN_SCOPE_SHARD.format(notebook=notebook),
         coverage_check=TASKGEN_CHECK_SHARD.format(notebook=notebook),
+        feedback=feedback_block(feedback),
+    )
+
+
+def taskgen_mined_prompt(
+    *, package: str, src: Path, python: Path, out: Path, analysis: Path, feedback: str | None = None
+) -> str:
+    """Build the prompt for one *mined-analysis* task-generation agent.
+
+    The third scope of the shared :data:`TASKGEN_PROMPT`: instead of a tutorial notebook the agent
+    is handed one real-world script (``analysis``, seeded into its working directory by the
+    harness — see :func:`acumen.taskgen.generate_tasks_sharded`) and told to re-ground its analyses
+    on bundled datasets. Task-writing rules, execution discipline and output schema are shared
+    verbatim with the other two generators.
+
+    Parameters
+    ----------
+    analysis
+        Path of the seeded candidate script inside the agent's working directory.
+    """
+    return TASKGEN_PROMPT.format(
+        package=package,
+        src=src,
+        python=python,
+        out=out,
+        out_dir=out.parent,
+        scripts_dir=out.parent / "scripts",
+        scope=TASKGEN_SCOPE_MINED.format(analysis=analysis),
+        coverage_check=TASKGEN_CHECK_MINED.format(analysis=analysis),
         feedback=feedback_block(feedback),
     )
 

@@ -568,3 +568,39 @@ records the decision. `acumen loop --headroom`; `acumen screen --by-model` (mode
 loop narrows to `hard` only with the callback firing at draft-count 0, refusal path spends nothing.
 Real `screen --by-model` on the squidpy workspace: `closeness_most_central[test]@haiku` is the one
 headroom task — matches the earlier diagnosis. Next: task mining (the corpus that makes P5 real).
+
+---
+
+## 2026-08-26 — Task mining (module 5): GitHub + web → candidates → tasks, proven live
+
+**Change.** `mining.py` + `acumen mine` + `acumen tasks --candidates DIR`:
+- **GitHub leg**: `gh search code` over the import + analysis namespaces (`sq.gr.`, `sq.im.`, …) for
+  `.ipynb` and `.py`, paced at 6.5 s (the endpoint allows 10/min); each hit fetched at the commit
+  the search returned (`gh api …/contents?ref=<sha>`) so origins are pinned and reproducible.
+- **Web leg** (`--url`): code lifted from `<pre>` blocks / markdown fences / raw `.py`/`.ipynb`. No
+  keyless web *search* API is worth depending on, so this takes URLs the operator knows rather than
+  pretending to discover them — said plainly in the docstring.
+- **The gate is structural, not a prompt**: keep only files that parse, reference ≥1 symbol of the
+  package's *real* public API (the same inventory `acumen coverage` uses), and make ≥1 package call
+  at **module level** — a library that wraps the package calls it only inside `def`s and is not an
+  analysis. Excluded outright: the target repo and its `.gitmodules` submodules (the tutorials are
+  already sharded — `scverse/squidpy-tutorials` slipped through the first run and prompted this),
+  tests/vendored dirs, `_private` files; exact-duplicate content collapses. Every rejection carries
+  a reason and `index.json` records provenance.
+- Notebooks flatten to code cells (`# %%` markers; magics commented, not dropped).
+- Task-gen seam: a candidate is **seeded into the shard agent's work dir** (not the source copy —
+  it isn't package source) and prompted with `TASKGEN_SCOPE_MINED`: same rules as a notebook shard,
+  plus "the script's own data is NOT available — re-ground every task on a bundled dataset, skip
+  what no bundled dataset can support". Same shard cache, same merge, same id namespacing.
+
+**Result.** +11 tests (175), ruff clean. **Real harvest**: one query (`sq.gr.nhood_enrichment`),
+46 s → 18 candidates (13 notebooks from real labs/workshops/papers — NBIS, ELIXIR, paper-figure
+repos — + 5 `.py`), 12 rejected with reasons (6 library wrappers: the top-level-call rule earning
+its keep). **Live mined→task proof** (sonnet, $1.31, ~6 min): the agent read a Visium lymph-node
+nhood notebook, searched squidpy's datasets module for a fit, re-grounded on `visium_hne` (bundled,
+expert-annotated regions — which also sidestepped the notebook's Leiden dependency missing from the
+venv), and wrote 1 task with train/test variants and analyst-defensible answers (most-enriched
+neighbor of hippocampus = Pyramidal_layer; of fiber tract = Lateral_ventricle). It also persisted
+its confirmation script under the namespaced id — the **first live proof of P2b** — and
+`acumen coverage` now reads it: API coverage of squidpy 1.8.4.dev19+g52856c2de: 4/99 (4%)
+  ground-truth scripts read from scripts (2 script(s), 1 task(s))

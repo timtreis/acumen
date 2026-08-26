@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,7 @@ from acumen.env import AuthMode, Target, build_agent_env
 from acumen.logs import LiveLog
 from acumen.paths import slugify
 from acumen.procs import label_env, reap
-from acumen.prompts import taskgen_prompt, taskgen_shard_prompt
+from acumen.prompts import taskgen_mined_prompt, taskgen_prompt, taskgen_shard_prompt
 from acumen.tasks import Task, TaskError, load_tasks, parse_tasks
 
 #: The filename the generation agent writes and we harvest from its work dir.
@@ -389,7 +389,8 @@ async def _run_generation_agent(
     auth_mode: AuthMode,
     extra_allow: Sequence[str],
     log: LiveLog | None,
-) -> tuple[list[Task], ResultMessage]:
+    seed_files: Mapping[str, str] | None = None,
+) -> tuple[list[Task], dict[str, str], ResultMessage]:
     """Run one generation agent in ``work_root`` and return its validated tasks and result.
 
     The isolation-critical core shared by the whole-package generator (:func:`generate_tasks`) and
@@ -401,9 +402,12 @@ async def _run_generation_agent(
 
     The caller owns ``work_root`` and its teardown (``reap`` + ``rmtree``) — the agent's scratch
     ``script.py`` lives under it and is discarded, so nothing about the ground-truth pipeline is
-    persisted, only the tasks it stages. ``make_prompt`` receives the staged ``tasks.yaml`` path
-    and returns the prompt, so the whole-package and per-notebook callers differ only in the prompt
-    they build over the same isolation.
+    persisted, only the tasks it stages (and their confirmation scripts, harvested for coverage).
+    ``make_prompt`` receives the staged ``tasks.yaml`` path and returns the prompt, so the
+    whole-package, per-notebook and mined-analysis callers differ only in the prompt they build
+    over the same isolation. ``seed_files`` (``{name: text}``) are written into the work dir before
+    the agent starts — how a mined candidate script reaches its shard agent without living in the
+    package source copy.
 
     Raises
     ------
@@ -416,6 +420,8 @@ async def _run_generation_agent(
     for path in (work, home, config_dir, home / "tmp"):
         path.mkdir(parents=True, exist_ok=True)
     staged = work / TASKS_FILE
+    for name, text in (seed_files or {}).items():
+        (work / name).write_text(text)
 
     # Marks the agent's processes so the caller's teardown can find what it leaves running.
     env = label_env(
@@ -671,10 +677,11 @@ async def generate_tasks_sharded(
     log_dir: Path | None = None,
     stream: bool = False,
     notebook_filter: Sequence[str] | None = None,
+    candidates_dir: Path | None = None,
     on_shard_start: Callable[[ShardOutcome], None] | None = None,
     on_shard_done: Callable[[ShardOutcome], None] | None = None,
 ) -> ShardedResult:
-    """Generate ``tasks.yaml`` by fanning out one generation agent per notebook.
+    """Generate ``tasks.yaml`` by fanning out one generation agent per notebook (or mined script).
 
     The scalable form of :func:`generate_tasks`. Instead of one agent enumerating and covering the
     whole package in a single context — which serializes the package into one agent's stamina and
@@ -684,6 +691,12 @@ async def generate_tasks_sharded(
     that fails is recorded and skipped rather than taking the pass down, and a shard whose file
     already parses is reused (resume by file presence). A final :func:`merge_shards` namespaces the
     ids by shard and writes the combined ``out_path``.
+
+    With ``candidates_dir`` the shards are the mined candidate scripts in that directory (one per
+    ``*.py``, see :mod:`acumen.mining`) instead of the package's notebooks: each is seeded into its
+    agent's working directory and prompted with :func:`taskgen_mined_prompt`. Same isolation, same
+    per-shard cache and merge — a mined corpus and a tutorial corpus are built the same way and can
+    be merged by hand afterwards.
 
     All shards share ONE read-only filtered source copy (built once), so isolation costs a single
     ``copytree`` rather than one per notebook; each shard still gets its own throwaway work/home and
@@ -720,7 +733,9 @@ async def generate_tasks_sharded(
     notebook_filter
         If given, keep only notebooks whose POSIX path contains any of these substrings — so a run
         can target a handful of notebooks (a proof run, or regenerating a subset) instead of the
-        whole package. ``None`` shards every notebook.
+        whole package. ``None`` shards every notebook. Applies to candidate slugs likewise.
+    candidates_dir
+        Shard over the mined ``*.py`` candidates here instead of the package's notebooks.
     on_shard_start, on_shard_done
         Optional progress callbacks, invoked as each shard is admitted and as it lands.
 
@@ -741,24 +756,33 @@ async def generate_tasks_sharded(
     try:
         # One read-only filtered copy shared by every shard — the isolation, built once.
         source_copy = build_filtered_source(target.src_dir, holder / "source")
-        notebooks = notebook_shards(source_copy)
-        if not notebooks:
-            raise TaskGenError(
-                f"no notebooks (*.ipynb) found under {target.src_dir} — sharded generation needs "
-                "tutorials to shard on. Check submodules are present, or use generate_tasks to "
-                "infer analyses from source instead."
-            )
-        if notebook_filter:
-            notebooks = [nb for nb in notebooks if any(s in nb.as_posix() for s in notebook_filter)]
+        # A shard is (slug, path-within-source-copy | None, candidate file | None).
+        if candidates_dir is not None:
+            candidates = sorted(candidates_dir.glob("*.py"))
+            if not candidates:
+                raise TaskGenError(f"no mined candidates (*.py) under {candidates_dir} — run `acumen mine` first")
+            shards: list[tuple[str, Path | None, Path | None]] = [(c.stem, None, c) for c in candidates]
+        else:
+            notebooks = notebook_shards(source_copy)
             if not notebooks:
-                raise TaskGenError(f"no notebooks matched --notebook {list(notebook_filter)}")
+                raise TaskGenError(
+                    f"no notebooks (*.ipynb) found under {target.src_dir} — sharded generation needs "
+                    "tutorials to shard on. Check submodules are present, or use generate_tasks to "
+                    "infer analyses from source instead."
+                )
+            shards = [(_shard_slug(nb), nb, None) for nb in notebooks]
+        if notebook_filter:
+            shards = [s for s in shards if any(sub in (s[1].as_posix() if s[1] else s[0]) for sub in notebook_filter)]
+            if not shards:
+                raise TaskGenError(f"no shards matched --notebook {list(notebook_filter)}")
         shards_dir.mkdir(parents=True, exist_ok=True)
 
         semaphore = asyncio.Semaphore(max_concurrency or cfg.max_concurrency)
         outcomes: list[ShardOutcome] = []
 
-        async def run_shard(notebook: Path) -> ShardOutcome:
-            slug = _shard_slug(notebook)
+        async def run_shard(shard: tuple[str, Path | None, Path | None]) -> ShardOutcome:
+            slug, nb_path, candidate = shard
+            notebook = nb_path if nb_path is not None else Path(candidate.name)  # type: ignore[union-attr]
             shard_path = shards_dir / f"{slug}.yaml"
             cached = _cached_shard(notebook, slug, shard_path)
             if cached is not None:
@@ -775,25 +799,49 @@ async def generate_tasks_sharded(
                 work_root = holder / "shards" / slug
                 work_root.mkdir(parents=True, exist_ok=True)
                 log = LiveLog.open(log_dir, f"tasks-{slug}", stream=stream) if log_dir is not None else None
-                try:
-                    tasks, scripts, result = await _run_generation_agent(
-                        work_root=work_root,
-                        source_copy=source_copy,
-                        target=target,
-                        make_prompt=lambda staged, nb=notebook: taskgen_shard_prompt(
+                if candidate is not None:
+                    # The mined script is seeded into the agent's work dir (not the source copy —
+                    # it is not package source) and the prompt points at it there.
+                    seed_name = f"analysis-{slug}.py"
+                    seed_files = {seed_name: candidate.read_text()}
+                    analysis_path = work_root / "work" / seed_name
+
+                    def make_prompt(staged: Path, analysis: Path = analysis_path) -> str:
+                        return taskgen_mined_prompt(
+                            package=target.pkg_name,
+                            src=source_copy,
+                            python=target.python,
+                            out=staged,
+                            analysis=analysis,
+                            feedback=feedback,
+                        )
+
+                else:
+                    seed_files = None
+
+                    def make_prompt(staged: Path, nb: Path = notebook) -> str:
+                        return taskgen_shard_prompt(
                             package=target.pkg_name,
                             src=source_copy,
                             python=target.python,
                             out=staged,
                             notebook=nb.as_posix(),
                             feedback=feedback,
-                        ),
+                        )
+
+                try:
+                    tasks, scripts, result = await _run_generation_agent(
+                        work_root=work_root,
+                        source_copy=source_copy,
+                        target=target,
+                        make_prompt=make_prompt,
                         model=model or cfg.tasks_model,
                         max_turns=max_turns,
                         max_usd=max_usd,
                         auth_mode=auth_mode,
                         extra_allow=cfg.env_passthrough,
                         log=log,
+                        seed_files=seed_files,
                     )
                     # Only a fully validated shard is written, so a present file always parses.
                     shard_path.write_text(dump_tasks(tasks))
@@ -832,7 +880,7 @@ async def generate_tasks_sharded(
                     on_shard_done(outcome)
                 return outcome
 
-        for coro in asyncio.as_completed([run_shard(nb) for nb in notebooks]):
+        for coro in asyncio.as_completed([run_shard(s) for s in shards]):
             outcomes.append(await coro)
 
         # Merge whatever landed (freshly generated + reused). Fails loudly if every shard failed.

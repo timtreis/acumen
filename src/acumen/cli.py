@@ -18,6 +18,17 @@ from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_t
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
 from acumen.loop import LoopError, run_iteration
+from acumen.mining import (
+    SEARCH_INTERVAL_S,
+    MineResult,
+    MiningError,
+    _repo_id,
+    default_queries,
+    mine_github,
+    mine_urls,
+    submodule_repos,
+    write_candidates,
+)
 from acumen.paths import SPLITS
 from acumen.report import ReportError, build_report
 from acumen.rulebooks import RulebookError
@@ -386,7 +397,7 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
 
-    if args.per_notebook:
+    if args.per_notebook or args.candidates:
         return _cmd_tasks_sharded(args, cfg, target, out, auth_mode)
 
     print(
@@ -419,11 +430,12 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
 
 
 def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, out: Path, auth_mode: AuthMode) -> int:
-    """Run per-notebook (sharded) task generation, streaming per-shard progress to the terminal."""
+    """Run sharded task generation (per notebook, or per mined candidate), streaming progress."""
     shards_dir = args.shards_dir or out.parent / f"{out.stem}.shards"
+    unit = "mined candidate" if args.candidates else "notebook"
     print(
-        f"generating tasks per notebook with {cfg.tasks_model}, up to {cfg.max_concurrency} at once "
-        f"(each reads its notebook and runs package code) ...",
+        f"generating tasks per {unit} with {cfg.tasks_model}, up to {cfg.max_concurrency} at once "
+        f"(each reads its {unit} and runs package code) ...",
         flush=True,
     )
     print(f"shards → {shards_dir}   logs → {args.log_dir}", flush=True)
@@ -451,6 +463,7 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
             log_dir=args.log_dir,
             stream=args.stream,
             notebook_filter=args.notebook,
+            candidates_dir=args.candidates,
             on_shard_done=on_done,
         )
     )
@@ -525,6 +538,54 @@ def _cmd_warm(args: argparse.Namespace) -> int:
     outcomes = _warm_cache(cfg, target, args.tasks)
     failed = [o for o in outcomes if not o.ok]
     return 1 if failed else 0
+
+
+def _cmd_mine(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
+    target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
+    print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+    # The gate counts only the package's real public API as a "symbol", the same inventory
+    # coverage uses — so a mined file is kept for touching real analyses, not for mentioning names.
+    inventory = inventory_in_venv(target.python, target.pkg_name).names
+    results = []
+    if not args.no_github:
+        queries = args.query or default_queries(target.pkg_name, args.alias)
+        # The target itself, its tutorial submodules (already sharded as notebooks), and anything
+        # the operator names: not analyses, or already covered.
+        own = _repo_id(cfg.repo)
+        exclude = [*([own] if own else []), *submodule_repos(target.src_dir), *(args.exclude_repo or [])]
+        print(
+            f"GitHub code search: {len(queries)} queries x (.ipynb, .py), up to {args.limit} hits each, "
+            f"paced at {SEARCH_INTERVAL_S:.0f}s (10 searches/min limit) ...",
+            flush=True,
+        )
+        results.append(
+            mine_github(
+                target.pkg_name,
+                queries,
+                exclude_repos=exclude,
+                limit=args.limit,
+                inventory=inventory,
+                min_symbols=args.min_symbols,
+                on_progress=lambda msg: print(f"  {msg}", flush=True),
+            )
+        )
+    if args.url:
+        print(f"web pages: {len(args.url)} ...", flush=True)
+        results.append(mine_urls(target.pkg_name, args.url, inventory=inventory, min_symbols=args.min_symbols))
+
+    written, rejected = write_candidates(results, args.out)
+    kept = sum(len(r.kept) for r in results)
+    print(f"\nmined {kept} candidate(s) ({len(written)} new) → {args.out.resolve()}")
+    for cand in (c for r in results for c in r.kept):
+        print(f"  + {cand.slug}  [{cand.kind}] {len(cand.symbols)} symbols  {cand.origin}")
+    if rejected:
+        print(f"\nrejected {len(rejected)}:")
+        for reason, n in MineResult(rejected=rejected).reasons().items():
+            print(f"  {n:4d}  {reason}")
+    print(f"\nnext: `acumen tasks --candidates {args.out} --out tasks_mined.yaml` to turn them into tasks")
+    return 0
 
 
 def _cmd_coverage(args: argparse.Namespace) -> int:
@@ -831,6 +892,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="with --per-notebook: only shard notebooks whose path contains SUBSTR (repeatable)",
     )
+    tasks_cmd.add_argument(
+        "--candidates",
+        type=Path,
+        metavar="DIR",
+        help="shard over the mined candidate scripts in DIR (from `acumen mine`) instead of notebooks",
+    )
     _add_auth_arg(tasks_cmd)
     _add_feedback_arg(tasks_cmd, extra=" (e.g. which functionality to skip or focus on)")
     _add_log_args(tasks_cmd)
@@ -871,6 +938,32 @@ def build_parser() -> argparse.ArgumentParser:
     warm_cmd.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
     warm_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     warm_cmd.set_defaults(func=_cmd_warm)
+
+    mine = sub.add_parser(
+        "mine",
+        help="harvest real analyses that use the target (GitHub code search, given web pages) into candidate scripts",
+    )
+    mine.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
+    mine.add_argument("--out", type=Path, default=Path("mined"), help="directory of candidate scripts (additive)")
+    mine.add_argument(
+        "--query", action="append", help="a GitHub code-search query (repeatable; default: import + namespaces)"
+    )
+    mine.add_argument("--alias", help="the package's conventional import alias for default queries (e.g. sq)")
+    mine.add_argument("--limit", type=int, default=100, help="max hits per query per file type (default 100)")
+    mine.add_argument("--url", action="append", help="a page/notebook/script URL to lift code from (repeatable)")
+    mine.add_argument("--no-github", action="store_true", help="skip GitHub; only the given --url pages")
+    mine.add_argument(
+        "--exclude-repo",
+        metavar="OWNER/NAME",
+        action="append",
+        help="skip hits from this repository (repeatable; the target and its submodules are always skipped)",
+    )
+    mine.add_argument(
+        "--min-symbols", type=int, default=1, help="public API symbols a candidate must reference (default 1)"
+    )
+    mine.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    mine.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    mine.set_defaults(func=_cmd_mine)
 
     loop = sub.add_parser(
         "loop",
@@ -949,6 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
         TaskError,
         EnvError,
         CoverageError,
+        MiningError,
         SkillError,
         DraftError,
         ImproveError,
