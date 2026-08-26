@@ -517,3 +517,32 @@ cwd-relative resolution is what the real warm proved). Next: P6-full rulebook ar
 **Result.** +8 tests in `tests/test_rulebooks.py` (160 total): provenance chain, same-text-same-hash,
 tamper detection, dir-level immutability, validate-before-write, seed provenance. Ruff clean. Next:
 leanness axis (size, not cost) in report.py.
+
+---
+
+## 2026-08-26 — Leanness axis = skill size, not cost (report restructure)
+
+**Change.** The user's steer (cost is not a metric acumen optimizes) reaches the report:
+- `skills.skill_size(dir)` = bytes of content files (SKILL.md + references; meta excluded, like the
+  hash). `Skill.size`; bench records `skill_bytes` in every `result.json` (0 for the baseline —
+  "no skill" genuinely weighs nothing, which is what anchors the frontier at the origin).
+- `load_results(skills_root=)` recovers `skill_bytes` for pre-field runs from the skill tree (size is
+  a property of the version dir); unrecoverable → NaN → left off the axis, never guessed.
+- **Trade-off figure**: x = skill size (formatted B/KB), frontier over (size, rate). "Size vs. success".
+- **Significance section — the real design change.** The old test was two-axis dominance ("cheaper
+  AND better", intersection–union p). With size, the second axis has zero sampling variance and the
+  baseline is the leanest thing possible by definition, so "leaner and better than baseline" is
+  vacuous. Restructured honestly: the paired, task-clustered bootstrap + Holm now tests **rate only**
+  (`_rate_p`); size is reported as the price paid; **On frontier** (`_frontier_probability` with a
+  fixed per-arm size axis) says whether that price was justified — how often no smaller skill matches
+  the rate. `p_cost`/`d_cost`/`_dominance_p` deleted. Prose rewritten. `_arm_sizes` reads the test
+  split only.
+- Cost stays as *data* (grid column, runs table) — it's informational, just not an objective.
+
+**Result.** 160 tests pass (rewrote the trade-off + significance tests for size; a subtle one: a
+better-but-bigger skill's frontier share is ~0.98, not 1.0, because rare resamples drawing only the
+tasks the baseline also passes tie it at 100% and the smaller baseline wins — correct behaviour,
+the share is robustness not certainty). Real report on the squidpy workspace: baseline 0 B, v1
+21.5 KB, v2 34.2 KB via the skills-tree fallback — and the improve step made v2 *bigger* for no
+pass gain, which is precisely what this axis is for. Possible follow-up (not built): between-version
+dominance claims (does v2 dominate v1: no bigger AND better) — the frontier share covers it for now.

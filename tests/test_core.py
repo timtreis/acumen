@@ -729,14 +729,14 @@ def test_load_warning_needs_most_of_the_arm_to_miss(
     assert bool(notes) is warned
 
 
-# --- the cost/success trade-off figure --------------------------------------------------
+# --- the size/success trade-off figure --------------------------------------------------
 
 #: The two markers matplotlib gives an error bar's caps; neither is a data point.
 _CAP_MARKERS = {"|", "_"}
 
 
 def _pooled_marks(figure: plt.Figure) -> list[tuple[float, float]]:
-    """``(cost, rate)`` of each pooled mark, in the order the arms are drawn.
+    """``(size, rate)`` of each pooled mark, in the order the arms are drawn.
 
     The pooled marks are the only ones carrying error bars, so they are exactly the axes'
     error-bar containers.
@@ -767,9 +767,9 @@ def test_tradeoff_pooled_mark_averages_runs_not_per_model_means(runs_root: Path,
     """
     other = "claude-opus-5"
     key = RunKey(arm="noskill", split="test", model=other, task_id="example_task", rep=1)
-    make_result(runs_root, key, success=False, cost_usd=0.30)
-    make_result(runs_root, replace(key, rep=2), success=False, cost_usd=0.30)
-    df = load_results(runs_root)  # the fixture's one passing $0.12 run, plus two failing $0.30 ones
+    make_result(runs_root, key, success=False)
+    make_result(runs_root, replace(key, rep=2), success=False)
+    df = load_results(runs_root)  # the fixture's one passing run, plus two failing ones
 
     figure = tradeoff_figure(df)
     try:
@@ -777,9 +777,9 @@ def test_tradeoff_pooled_mark_averages_runs_not_per_model_means(runs_root: Path,
     finally:
         plt.close(figure)
 
-    # Over runs: ($0.12 + $0.30 + $0.30)/3 and 1 of 3 passing. Over per-model means it would
-    # have been $0.21 and 50%.
-    assert pooled == pytest.approx((0.24, 1 / 3))
+    # Over runs: 1 of 3 passing, at the baseline's size of 0. Over per-model means it would
+    # have been 50%.
+    assert pooled == pytest.approx((0.0, 1 / 3))
 
 
 def test_tradeoff_shape_carries_the_arm_and_colour_carries_the_model(runs_root: Path, model: str, make_result) -> None:
@@ -801,21 +801,24 @@ def test_tradeoff_shape_carries_the_arm_and_colour_carries_the_model(runs_root: 
 
 
 def test_tradeoff_frontier_steps_between_the_marks_nothing_beats(runs_root: Path, model: str, make_result) -> None:
-    """The staircase holds each rate until the next frontier point's price, then steps up.
+    """The staircase holds each rate until the next frontier point's size, then steps up.
 
-    A dominated arm — dearer *and* worse — must leave no trace on the line, and the path must
+    A dominated arm — bigger *and* worse — must leave no trace on the line, and the path must
     never cut a diagonal between two points, which would claim a result nobody measured.
     """
     other = "claude-opus-5"
-    # Cheap and good, dear and bad, dear and best: only the first and last are non-dominated.
-    make_result(runs_root, RunKey(arm="skill_v1", split="test", model=other, task_id="example_task", rep=1))
+    # A 1 KB skill that passes and a 5 KB one that fails, beside the fixture's passing baseline
+    # (size 0): the baseline alone is non-dominated, both skills are bigger and no better.
+    make_result(
+        runs_root, RunKey(arm="skill_v1", split="test", model=other, task_id="example_task", rep=1), skill_bytes=1024
+    )
     make_result(
         runs_root,
         RunKey(arm="skill_v2", split="test", model=other, task_id="example_task", rep=1),
-        cost_usd=0.50,
+        skill_bytes=5120,
         success=False,
     )
-    df = load_results(runs_root)  # plus the fixture's $0.12 passing baseline run
+    df = load_results(runs_root)  # plus the fixture's passing baseline run at size 0
 
     figure = tradeoff_figure(df)
     try:
@@ -824,9 +827,9 @@ def test_tradeoff_frontier_steps_between_the_marks_nothing_beats(runs_root: Path
     finally:
         plt.close(figure)
 
-    # Both $0.12 runs pass, so the cheapest 100% mark alone survives; the $0.50 failure is
-    # dominated and the riser starts at the axis floor.
-    assert vertices == [(pytest.approx(0.12), pytest.approx(y_min)), (pytest.approx(0.12), pytest.approx(1.0))]
+    # The size-0 100% mark alone survives; the bigger marks are dominated and the riser starts
+    # at the axis floor.
+    assert vertices == [(pytest.approx(0.0), pytest.approx(y_min)), (pytest.approx(0.0), pytest.approx(1.0))]
 
 
 def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model: str, make_result) -> None:
@@ -840,7 +843,7 @@ def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model:
 
     figure = tradeoff_figure(df)
     try:
-        assert _pooled_marks(figure) == [(pytest.approx(0.12), 0.0)]
+        assert _pooled_marks(figure) == [(pytest.approx(0.0), 0.0)]
         assert _frontier(figure)  # degenerate but drawn, rather than crashing on the empty case
     finally:
         plt.close(figure)
@@ -848,10 +851,12 @@ def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model:
 
 def test_tradeoff_plots_the_test_split_only(runs_root: Path, model: str, make_result) -> None:
     """Train runs feed the improver; a report measures held-out performance and must not mix them."""
+    # A huge skill benched on the train split only: if train leaked in, a second pooled mark
+    # would appear far to the right.
     make_result(
         runs_root,
-        RunKey(arm="noskill", split="train", model=model, task_id="example_task", rep=2),
-        cost_usd=99.0,
+        RunKey(arm="skill_v1", split="train", model=model, task_id="example_task", rep=1),
+        skill_bytes=99_999,
     )
     df = load_results(runs_root)
 
@@ -861,11 +866,11 @@ def test_tradeoff_plots_the_test_split_only(runs_root: Path, model: str, make_re
     finally:
         plt.close(figure)
 
-    assert pooled == pytest.approx((0.12, 1.0))  # the fixture's test run alone
+    assert pooled == pytest.approx((0.0, 1.0))  # the fixture's baseline test run alone
 
 
 def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model: str, make_result) -> None:
-    """The cost label at the origin is centred on the corner the rate floor label also sits on.
+    """The size label at the origin is centred on the corner the rate floor label also sits on.
 
     Left to itself that puts half of one under the other, which is unreadable exactly where the
     reader looks to learn the rate axis is truncated.
@@ -884,7 +889,7 @@ def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model:
         # The locators run past the view, so the corner pair are the innermost *visible* labels.
         x_lo, x_hi = ax.get_xlim()
         y_lo, y_hi = ax.get_ylim()
-        cost = min(
+        size = min(
             (t for t in ax.get_xticklabels() if x_lo <= t.get_position()[0] <= x_hi),
             key=lambda t: t.get_position()[0],
         )
@@ -893,7 +898,7 @@ def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model:
             key=lambda t: t.get_position()[1],
         )
         renderer = figure.canvas.get_renderer()
-        overlaps = cost.get_window_extent(renderer).overlaps(rate.get_window_extent(renderer))
+        overlaps = size.get_window_extent(renderer).overlaps(rate.get_window_extent(renderer))
     finally:
         plt.close(figure)
 
@@ -956,64 +961,74 @@ def test_pareto_steps_never_cuts_a_diagonal() -> None:
 _TASKS = ("alpha", "beta", "gamma", "delta", "epsilon")
 
 
-def _arena(runs_root: Path, model: str, make_result, spec: dict[str, tuple[float, list[bool]]]) -> pd.DataFrame:
-    """A run tree of ``arm -> (cost per run, one success flag per task)``, one rep each."""
-    for arm, (cost, outcomes) in spec.items():
+def _arena(runs_root: Path, model: str, make_result, spec: dict[str, tuple[int, list[bool]]]) -> pd.DataFrame:
+    """A run tree of ``arm -> (skill size in bytes, one success flag per task)``, one rep each."""
+    for arm, (size, outcomes) in spec.items():
         for task, ok in zip(_TASKS, outcomes, strict=True):
             key = RunKey(arm=arm, split="test", model=model, task_id=task, rep=1)
-            make_result(runs_root, key, cost_usd=cost, success=ok)
+            make_result(runs_root, key, skill_bytes=size, success=ok)
     return load_results(runs_root)
 
 
-def test_cheaper_but_worse_does_not_dominate(runs_root: Path, model: str, make_result) -> None:
-    """The behaviour the whole design exists for: price cannot buy past a worse success rate.
+def test_size_buys_no_claim_and_a_bigger_worse_skill_is_off_the_frontier(
+    runs_root: Path, model: str, make_result
+) -> None:
+    """The claim tested is "better", full stop; size is the price shown beside it.
 
-    A single combined score would rank the cheap arm first — it is a fraction of the cost and only
-    slightly less accurate. Requiring *both* axes to improve refuses it, because the evidence for
-    dominance is only as strong as its weaker half.
+    A skill can never be leaner than no skill, so a joint "leaner and better" test would be vacuous.
+    Instead: the p-value is about rate alone, and the frontier share says whether the bytes were
+    justified — a bigger skill that is *worse* never holds the frontier, whatever its p.
     """
     df = _arena(
         runs_root,
         model,
         make_result,
         {
-            "noskill": (1.00, [True, True, False, False, False]),
-            "skill_v1": (0.10, [True, False, False, False, False]),  # far cheaper, strictly worse
-            "skill_v2": (0.10, [True, True, True, True, True]),  # cheaper and better everywhere
+            "noskill": (0, [True, True, False, False, False]),
+            "skill_v1": (4096, [True, False, False, False, False]),  # bigger, strictly worse
+            "skill_v2": (4096, [True, True, True, True, True]),  # same size, better everywhere
         },
     )
 
     tests = skill_tests(df, resamples=4000)
     by_arm = tests.comparisons.set_index("challenger")
+    frontier = tests.arms.set_index("arm")["frontier"]
 
-    # Overwhelming evidence on cost, none on rate -> the max is large and the claim fails.
-    assert by_arm.loc["skill_v1", "p_cost"] < 0.05
-    assert by_arm.loc["skill_v1", "p_rate"] > 0.5
-    assert by_arm.loc["skill_v1", "p"] == by_arm.loc["skill_v1", "p_rate"]
-    # Better on both axes, so the same rule passes it.
-    assert by_arm.loc["skill_v2", "p"] < 0.05
+    assert by_arm.loc["skill_v1", "p"] > 0.5  # no evidence it is better
+    assert by_arm.loc["skill_v2", "p"] < 0.05  # strong evidence it is
+    assert "p_cost" not in tests.comparisons.columns and "d_cost" not in tests.comparisons.columns
+    # v1 is dominated in every resample by the baseline (smaller, better). v2 pays 4 KB for a
+    # rate nothing smaller matches, so it holds the frontier in all but the rare draws made only
+    # of the two tasks the baseline also passes — there the smaller baseline ties it and wins.
+    # The baseline, at size 0, is never dominated.
+    assert frontier["skill_v1"] == 0.0
+    assert frontier["skill_v2"] > 0.95
+    assert frontier["noskill"] == 1.0
 
 
 def test_frontier_probability_agrees_with_the_plotted_frontier(runs_root: Path, model: str, make_result) -> None:
-    """An arm that dominates every resample is never off the frontier, and a dominated one never on."""
+    """An arm nothing smaller matches is never off the frontier; one a smaller arm beats never on."""
     df = _arena(
         runs_root,
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.10, [True, True, True, True, True]),  # cheaper and better, always
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (1024, [True, True, True, True, True]),  # bigger, but better every time
+            "skill_v2": (2048, [True, False, False, False, False]),  # bigger than v1 and worse
         },
     )
 
     tests = skill_tests(df, resamples=2000)
     frontier = tests.arms.set_index("arm")["frontier"]
-    observed = _pareto_front(list(zip(tests.arms["cost"], tests.arms["rate"], strict=True)))
+    observed = _pareto_front(list(zip(tests.arms["size"], tests.arms["rate"], strict=True)))
 
+    assert frontier["noskill"] == 1.0  # size 0: nothing is smaller, so never dominated
     assert frontier["skill_v1"] == 1.0
-    assert frontier["noskill"] == 0.0
-    # The column and the plot's staircase must pick out the same arm on the observed data.
-    assert observed == [(pytest.approx(0.10), pytest.approx(1.0))]
+    assert frontier["skill_v2"] == 0.0
+    # The column and the plot's staircase must pick out the same arms on the observed data
+    # (the baseline is 2/6: one pass here plus the fixture's passing example_task run).
+    assert observed == [(pytest.approx(0.0), pytest.approx(1 / 3)), (pytest.approx(1024.0), pytest.approx(1.0))]
 
 
 def test_skill_tests_compares_every_version_with_the_baseline_only(runs_root: Path, model: str, make_result) -> None:
@@ -1027,9 +1042,9 @@ def test_skill_tests_compares_every_version_with_the_baseline_only(runs_root: Pa
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.50, [True, True, False, False, False]),
-            "skill_v2": (0.10, [True, True, True, True, True]),
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (2048, [True, True, False, False, False]),
+            "skill_v2": (1024, [True, True, True, True, True]),
         },
     )
 
@@ -1070,7 +1085,7 @@ def test_holm_is_monotone_and_scales_by_remaining_tests(raw: list[float], expect
 def test_best_cells_follows_each_column_own_direction(
     values: list[float | None], highest: bool, expected: set[int]
 ) -> None:
-    """Best means highest for the rates and lowest for cost and p, so the caller states which."""
+    """Best means highest for the rates and lowest for size and p, so the caller states which."""
     assert _best_cells(values, highest=highest) == expected
 
 
@@ -1081,18 +1096,18 @@ def test_tests_table_bolds_the_winner_in_each_column(runs_root: Path, model: str
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.10, [True, True, True, True, True]),
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (1024, [True, True, True, True, True]),
         },
     )
 
     html = _tests_table_html(skill_tests(df, resamples=2000))
 
     assert "<strong>100.0%</strong>" in html  # highest success rate wins its column
-    assert "<strong>$0.100</strong>" in html  # *lowest* cost wins its own
-    assert "<strong>$1.000</strong>" not in html
+    assert "<strong>0 B</strong>" in html  # *smallest* size wins its own
+    assert "<strong>1.0 KB</strong>" not in html
     # The comparison columns sit under one header, so it is clear they all refer to the baseline.
-    assert 'colspan="4">Compared with No skill' in html
+    assert 'colspan="3">Compared with No skill' in html
 
 
 def test_skill_tests_is_deterministic(runs_root: Path, model: str, make_result) -> None:
@@ -1129,15 +1144,19 @@ def test_skill_tests_declines_to_test_too_few_tasks(runs_root: Path, model: str,
 
 def test_skill_tests_uses_the_test_split_only(runs_root: Path, model: str, make_result) -> None:
     """Train runs feed the improver, so letting them into the test would be marking its own work."""
-    spec = {"noskill": (1.00, [True, False, True, False, False]), "skill_v1": (0.20, [True, True, True, True, False])}
+    spec = {"noskill": (0, [True, False, True, False, False]), "skill_v1": (2048, [True, True, True, True, False])}
     before = skill_tests(_arena(runs_root, model, make_result, spec), resamples=2000)
 
-    for task in _TASKS:  # a pile of cheap, always-passing train runs for the baseline
-        make_result(runs_root, RunKey(arm="noskill", split="train", model=model, task_id=task, rep=9), cost_usd=0.001)
+    for task in _TASKS:  # a pile of always-passing train runs, each claiming an absurd skill size
+        make_result(
+            runs_root,
+            RunKey(arm="skill_v1", split="train", model=model, task_id=task, rep=9),
+            skill_bytes=99_999,
+        )
     after = skill_tests(load_results(runs_root), resamples=2000)
 
     assert after.comparisons["p"].tolist() == before.comparisons["p"].tolist()
-    assert after.arms["cost"].tolist() == before.arms["cost"].tolist()
+    assert after.arms["size"].tolist() == before.arms["size"].tolist()
 
 
 def test_arm_marker_widens_with_the_version() -> None:

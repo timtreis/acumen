@@ -104,6 +104,7 @@ def write_result(runs_root: Path, key: RunKey, **overrides) -> Path:
         "pkg_version": "target 0.1",
         "commit": "abc1234",
         "skill_hash": None,
+        "skill_bytes": 0,
         "skill_name": None,
         "skill_loaded": key.arm != "noskill",
         "sdk_version": "0.2.120",

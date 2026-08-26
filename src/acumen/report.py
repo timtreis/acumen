@@ -40,7 +40,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from acumen.paths import NOSKILL_ARM, RESULT_FILE, TRANSCRIPT_HTML, skill_from_arm
-from acumen.skills import SkillError, read_meta, skill_content, skill_dir
+from acumen.skills import SkillError, read_meta, skill_content, skill_dir, skill_size
 from acumen.tasks import Task
 
 # ── Palette ──────────────────────────────────────────────────────────────────────────
@@ -190,19 +190,45 @@ def _fmt_seconds(value: float) -> str:
     return f"{value:.0f}s"
 
 
-def load_results(runs_root: Path) -> pd.DataFrame:
+def _skill_bytes(df: pd.DataFrame, skills_root: Path | None) -> pd.Series:
+    """Per-run skill size in bytes — the leanness axis — as a float column (``NaN`` = unknown).
+
+    Recent runs carry ``skill_bytes`` in ``result.json``; the baseline is always ``0`` (no skill
+    weighs nothing). For runs that predate the field, the size is recovered from the skill tree
+    when one is given, since size is a property of the version directory, not of the run. What
+    cannot be recovered stays ``NaN`` and is left off the size axis rather than guessed.
+    """
+    sizes = df["skill_bytes"].astype(float) if "skill_bytes" in df.columns else pd.Series(math.nan, index=df.index)
+    sizes = sizes.where(df["arm"] != NOSKILL_ARM, 0.0)
+    if skills_root is not None:
+        for arm in df.loc[sizes.isna(), "arm"].unique():
+            version = skill_from_arm(arm)
+            if version is None:
+                continue
+            try:
+                sizes[df["arm"] == arm] = float(skill_size(skill_dir(skills_root, version)))
+            except SkillError:
+                continue  # the version is gone; its size is genuinely unknown
+    return sizes
+
+
+def load_results(runs_root: Path, *, skills_root: Path | None = None) -> pd.DataFrame:
     """Load every ``result.json`` under ``runs_root`` into a DataFrame.
 
     Parameters
     ----------
     runs_root
         The ``runs/`` root directory.
+    skills_root
+        The ``skills/`` tree, used only to recover ``skill_bytes`` for runs recorded before the
+        field existed (see :func:`_skill_bytes`).
 
     Returns
     -------
     One row per completed run. In addition to the ``result.json`` fields, each row carries
-    ``total_tokens`` and — for the runs table — ``result_path`` and ``transcript_path``
-    (the sibling ``transcript.html``, whether or not it exists).
+    ``total_tokens``, ``skill_bytes`` (float, ``NaN`` when unknown) and — for the runs table —
+    ``result_path`` and ``transcript_path`` (the sibling ``transcript.html``, whether or not it
+    exists).
 
     Raises
     ------
@@ -227,6 +253,7 @@ def load_results(runs_root: Path) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     df["total_tokens"] = df["input_tokens"] + df["output_tokens"]
+    df["skill_bytes"] = _skill_bytes(df, skills_root)
     df["arm_label"] = df["arm"].map(arm_label)
     df["_arm_order"] = df["arm"].map(_arm_sort_key)
     df = df.sort_values(["_arm_order", "split", "task_id", "model", "rep"]).reset_index(drop=True)
@@ -316,7 +343,16 @@ _COLUMNS = [
 _PROPORTION_COLUMN = {"rate": "success", "loaded": "skill_loaded"}
 
 #: Metric key → the resource column it averages (the proportions are handled separately).
-_MEAN_COLUMN = {"tokens": "total_tokens", "cost": "cost_usd", "time": "duration_s"}
+#: ``size`` is constant within an arm, so its per-run mean is just the skill's size — it rides
+#: the same machinery so the trade-off figure's marks cannot drift from the grid's.
+_MEAN_COLUMN = {"tokens": "total_tokens", "cost": "cost_usd", "time": "duration_s", "size": "skill_bytes"}
+
+
+def _fmt_bytes(value: float) -> str:
+    """Compact skill size, e.g. ``0 B`` / ``820 B`` / ``3.4 KB``."""
+    if value >= 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value:.0f} B"
 
 
 def _model_tier(model: str) -> str:
@@ -591,21 +627,21 @@ def metrics_figure(df: pd.DataFrame, *, split_hue: bool, colors: Mapping[str, st
 
 
 def _pareto_front(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
-    """The non-dominated ``(cost, rate)`` points, cheapest first.
+    """The non-dominated ``(size, rate)`` points, smallest first.
 
-    A point is dominated when another costs no more *and* succeeds no less — nothing would make
-    you pick it. What survives is the frontier: the best rate available at each price.
+    A point is dominated when another is no bigger *and* succeeds no less — nothing would make
+    you pick it. What survives is the frontier: the best rate available at each size.
 
-    Sorting by cost ascending and rate descending lets one pass do it. Walking that order, a
+    Sorting by size ascending and rate descending lets one pass do it. Walking that order, a
     point is on the frontier exactly when it beats the best rate seen so far, since everything
-    already passed costs no more. The tie-break on rate matters: at equal cost the better rate
+    already passed is no bigger. The tie-break on rate matters: at equal size the better rate
     comes first and knocks out its twin.
     """
     front: list[tuple[float, float]] = []
     best = -math.inf
-    for cost, rate in sorted(points, key=lambda p: (p[0], -p[1])):
+    for size, rate in sorted(points, key=lambda p: (p[0], -p[1])):
         if rate > best:
-            front.append((cost, rate))
+            front.append((size, rate))
             best = rate
     return front
 
@@ -613,41 +649,46 @@ def _pareto_front(points: Sequence[tuple[float, float]]) -> list[tuple[float, fl
 def _pareto_steps(front: Sequence[tuple[float, float]], y_min: float) -> tuple[list[float], list[float]]:
     """The frontier as a staircase: x and y for a path tracing the edge of what was achieved.
 
-    Between two frontier points the best rate available is the cheaper one's, so the path holds
-    that rate until the price of the next one is reached and then steps up — a curve through the
+    Between two frontier points the best rate available is the smaller one's, so the path holds
+    that rate until the size of the next one is reached and then steps up — a curve through the
     points would claim results between them that nobody measured. The path drops to the floor at
-    the cheapest point, closing the region off: to its left, nothing was achieved at any rate.
+    the smallest point, closing the region off: to its left, nothing was achieved at any rate.
     """
     xs: list[float] = []
     ys: list[float] = []
     held = y_min  # the rate carried forward from the previous step, or the floor at the first
-    for cost, rate in front:
-        xs += [cost, cost]
+    for size, rate in front:
+        xs += [size, size]
         ys += [held, rate]
         held = rate
     return xs, ys
 
 
 def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None) -> plt.Figure:
-    """Cost per run against success rate — where each skill version buys what, and at what price.
+    """Skill size against success rate — what each version's bytes buy.
 
     The metrics grid reports every measure on its own axis, which answers "how much?" but never
-    "was it worth it?". This plots the two headline measures against each other, so the reader
-    can see whether a version bought accuracy, saved money, or both. Up and to the left is better.
+    "was it worth it?". This plots success against the one thing a skill author controls — how
+    much the agent has to read — so the reader can see whether a version earned its size. Up and
+    to the left is better: the same success with less to read. Dollar cost is deliberately *not*
+    the axis: it is a property of the model and the run, not of the skill, and it is not something
+    acumen optimizes.
 
     Each model gets its own mark per arm, in the model's colour; each arm also gets a larger grey
-    mark pooling every model, carrying standard errors on both axes — the same statistic the
+    mark pooling every model, carrying a standard error on the rate — the same statistic the
     grid's grey bar reports. Only the pooled marks are labelled; labelling every point would
     collide. Hue stays the *model*, as in every other figure here, so the arm rides a second
     channel: marker shape (see :func:`_arm_marker`). Identity therefore never rests on colour alone.
 
     A staircase traces the **Pareto frontier** over every mark shown — the combinations nothing
     else beats on both counts at once. Anything below and to the right of it is dominated:
-    something on the line costs less *and* succeeds more, so there is no reason to choose it.
-    The frontier is drawn over the pooled marks as well as the per-model ones, so it really is
-    the outer edge of the whole plot and no mark can float above it.
+    something on the line is no bigger *and* succeeds more, so there is no reason to choose it.
+    The baseline sits at size zero, so it always anchors the frontier's first step. The frontier is
+    drawn over the pooled marks as well as the per-model ones, so it really is the outer edge of
+    the whole plot and no mark can float above it. An arm whose size is unknown (runs recorded
+    before it was tracked, with no skill tree to recover it from) is left off the figure.
 
-    Cost is anchored at zero, but the rate axis starts just below the lowest mark rather than at
+    Size is anchored at zero, but the rate axis starts just below the lowest mark rather than at
     zero. Anchoring it too would strand every point in the top third of an otherwise empty panel,
     close enough together to hide the differences the figure exists to show. That is safe here in
     a way it would not be on the grid's bars: position carries the value, not the length of
@@ -668,24 +709,26 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
     colors = {model: resolved.get(model, _model_color(model)) for model in models}
     colors[_ALL_MODELS] = _ALL_MODELS_COLOR
 
-    # (arm, model, cost, cost_err, rate, rate_err) for every cell with runs behind it. Both
-    # coordinates come from _cell_value, so these marks cannot drift from the grid's bars.
+    # (arm, model, size, size_err, rate, rate_err) for every cell with runs behind it. Both
+    # coordinates come from _cell_value, so these marks cannot drift from the grid's bars. Size is
+    # constant within an arm, so its error is 0 — kept in the tuple so the pooled errorbar call
+    # below stays uniform. A NaN size (unknown) drops the cell from the figure.
     points = []
     for arm in arms:
         for model in [*models, _ALL_MODELS]:
-            cost, cost_err, present = _cell_value(df, arm, model, _REPORTED_SPLIT, "cost")
-            if not present:
+            size, size_err, present = _cell_value(df, arm, model, _REPORTED_SPLIT, "size")
+            if not present or not math.isfinite(size):
                 continue
             rate, rate_err, _ = _cell_value(df, arm, model, _REPORTED_SPLIT, "rate")
-            points.append((arm, model, cost, cost_err, rate, rate_err))
+            points.append((arm, model, size, size_err, rate, rate_err))
 
-    x_max = max((cost + err for _a, _m, cost, err, _r, _re in points), default=0.0) * 1.15 or 1.0
+    x_max = max((size + err for _a, _m, size, err, _r, _re in points), default=0.0) * 1.15 or 1.0
     # The pooled marks carry error bars and the per-model ones do not, so only the pooled ones
     # reach below their own value. Round down to a tenth so the ticks land on whole percents.
     floors = [rate - err if model == _ALL_MODELS else rate for _a, model, _c, _ce, rate, err in points]
     y_min = max(0.0, math.floor((min(floors, default=0.0) - 0.02) * 10) / 10)
     y_max = 1.04  # a little air over a perfect score, without a tick past 100%
-    front = _pareto_front([(cost, rate) for _a, _m, cost, _e, rate, _re in points])
+    front = _pareto_front([(size, rate) for _a, _m, size, _e, rate, _re in points])
 
     with plt.rc_context(_RC):
         fig, ax = plt.subplots(figsize=(5.0, 3.5))
@@ -694,7 +737,7 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
         steps_x, steps_y = _pareto_steps(front, y_min)
         ax.plot(steps_x, steps_y, color=INK, alpha=0.38, linewidth=1.1, zorder=2)
         if front:
-            # Named at the foot of its first riser — the cheap-and-poor corner, which by
+            # Named at the foot of its first riser — the small-and-poor corner, which by
             # construction has nothing plotted in it.
             ax.annotate(
                 "Pareto frontier",
@@ -708,11 +751,11 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
                 alpha=0.6,
             )
 
-        for arm, model, cost, _err, rate, _rate_err in points:
+        for arm, model, size, _err, rate, _rate_err in points:
             if model == _ALL_MODELS:
                 continue
             ax.plot(
-                cost,
+                size,
                 rate,
                 marker=_arm_marker(arm),
                 color=colors[model],
@@ -726,13 +769,13 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
                 zorder=3,
             )
         # The pooled marks go on last so they sit above the per-model cloud they summarise.
-        for arm, model, cost, cost_err, rate, rate_err in points:
+        for arm, model, size, size_err, rate, rate_err in points:
             if model != _ALL_MODELS:
                 continue
             ax.errorbar(
-                cost,
+                size,
                 rate,
-                xerr=cost_err,
+                xerr=size_err,
                 yerr=rate_err,
                 marker=_arm_marker(arm),
                 color=_ALL_MODELS_COLOR,
@@ -747,7 +790,7 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
             )
             ax.annotate(
                 _skill_label(arm),
-                (cost, rate),
+                (size, rate),
                 textcoords="offset points",
                 xytext=(10, 6),
                 fontsize=8,
@@ -758,15 +801,15 @@ def tradeoff_figure(df: pd.DataFrame, *, colors: Mapping[str, str] | None = None
 
         ax.yaxis.set_major_locator(mticker.MultipleLocator(0.1))
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p: f"${v:.3f}"))
-        ax.set_xlabel("Cost / run")
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _p: _fmt_bytes(v)))
+        ax.set_xlabel("Skill size")
         ax.set_ylabel("Success rate")
         ax.grid(color=INK, alpha=0.14, linewidth=0.8)
         ax.set_axisbelow(True)
         # The ticks have no length, so by default the labels sit tight against the spines and
-        # the pair nearest the origin collide: the first cost label is centred on the corner,
+        # the pair nearest the origin collide: the first size label is centred on the corner,
         # which puts half of it under the rate label sitting at the same height. Dropping the
-        # cost labels clears the rate label by height instead, which holds however wide either
+        # size labels clears the rate label by height instead, which holds however wide either
         # label runs — unlike nudging them sideways, which depends on the numbers' width.
         ax.tick_params(length=0, pad=4)
         ax.tick_params(axis="x", pad=9)
@@ -902,82 +945,85 @@ def _holm(pvalues: Sequence[float]) -> list[float]:
     return adjusted
 
 
-def _cluster_totals(df: pd.DataFrame, arms: Sequence[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Summed cost, successes and run counts per (task, arm) over the reported split.
+def _cluster_totals(df: pd.DataFrame, arms: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Summed successes and run counts per (task, arm) over the reported split.
 
-    These are the sufficient statistics for the bootstrap: both metrics are ratios of sums, so a
+    These are the sufficient statistics for the bootstrap: the rate is a ratio of sums, so a
     resample never has to touch an individual run again.
     """
     test = df[df["split"] == _REPORTED_SPLIT]
     clusters = sorted(test[_CLUSTER_COLUMN].unique())
     shape = (len(clusters), len(arms))
-    cost, successes, runs = np.zeros(shape), np.zeros(shape), np.zeros(shape)
+    successes, runs = np.zeros(shape), np.zeros(shape)
     for ci, cluster in enumerate(clusters):
         for ai, arm in enumerate(arms):
             rows = test[(test[_CLUSTER_COLUMN] == cluster) & (test["arm"] == arm)]
-            cost[ci, ai] = rows["cost_usd"].sum()
             successes[ci, ai] = rows["success"].sum()
             runs[ci, ai] = len(rows)
-    return cost, successes, runs
+    return successes, runs
 
 
-def _bootstrap_arms(
-    cost: np.ndarray, successes: np.ndarray, runs: np.ndarray, *, resamples: int, seed: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Resample whole tasks and recompute every arm's rate and cost per run.
+def _arm_sizes(df: pd.DataFrame, arms: Sequence[str]) -> np.ndarray:
+    """Each arm's skill size in bytes (``NaN`` if unknown) — constant per arm, so no resampling.
+
+    Size is a property of the skill artifact, not of a run: it does not vary with which tasks are
+    drawn, so it enters the bootstrap as a fixed axis rather than a resampled one. Read from the
+    reported split only, like everything else the test section uses.
+    """
+    test = df[df["split"] == _REPORTED_SPLIT]
+    return np.array([float(test.loc[test["arm"] == arm, "skill_bytes"].max()) for arm in arms])
+
+
+def _bootstrap_rates(successes: np.ndarray, runs: np.ndarray, *, resamples: int, seed: int) -> np.ndarray:
+    """Resample whole tasks and recompute every arm's success rate.
 
     Drawing ``n`` tasks with replacement *is* a multinomial over the tasks, so the cluster counts
-    come from one call and the whole bootstrap collapses to two matrix products — every arm and
+    come from one call and the whole bootstrap collapses to a matrix product — every arm and
     every resample at once. Each resample reuses the same drawn tasks for every arm, which is
     what makes the comparison paired: task difficulty cancels instead of adding noise.
     """
-    n_clusters = len(cost)
+    n_clusters = len(successes)
     rng = np.random.default_rng(seed)
     counts = rng.multinomial(n_clusters, np.full(n_clusters, 1 / n_clusters), size=resamples).astype(float)
     drawn = counts @ runs
     # An arm absent from every drawn task divides by zero; the NaN is dropped downstream rather
     # than being counted as evidence either way.
     with np.errstate(invalid="ignore", divide="ignore"):
-        return (counts @ successes) / drawn, (counts @ cost) / drawn
+        return (counts @ successes) / drawn
 
 
-def _frontier_probability(rate: np.ndarray, cost_per_run: np.ndarray) -> np.ndarray:
-    """Share of resamples in which each arm is non-dominated.
+def _frontier_probability(rate: np.ndarray, size: np.ndarray) -> np.ndarray:
+    """Share of resamples in which each arm is non-dominated on (size, rate).
 
-    The same rule as :func:`_pareto_front` — cheaper-or-equal and better-or-equal, strictly so on
-    one axis — broadcast over every pair of arms and every resample at once, so the column and
-    the plot's staircase cannot disagree. Read it as robustness, not as a test: it says how often
-    an arm survives a fresh draw of tasks, and has no null hypothesis to correct for.
+    The same rule as :func:`_pareto_front` — no-bigger-or-equal and better-or-equal, strictly so
+    on one axis — broadcast over every pair of arms and every resample at once, so the column and
+    the plot's staircase cannot disagree. Size is fixed per arm and only the rates resample, so
+    this measures how often a bigger skill's extra bytes still buy a rate no smaller skill
+    matches. Read it as robustness, not as a test: it has no null hypothesis to correct for. An
+    arm of unknown size gets ``NaN`` — it cannot be placed.
     """
-    cost, other_cost = cost_per_run[:, :, None], cost_per_run[:, None, :]
+    own_size, other_size = size[None, :, None], size[None, None, :]
     own, other = rate[:, :, None], rate[:, None, :]
-    dominated = (other_cost <= cost) & (other >= own) & ((other_cost < cost) | (other > own))
-    return (~dominated.any(axis=2)).mean(axis=0)
+    dominated = (other_size <= own_size) & (other >= own) & ((other_size < own_size) | (other > own))
+    share = (~dominated.any(axis=2)).mean(axis=0)
+    return np.where(np.isfinite(size), share, math.nan)
 
 
-def _dominance_p(
-    rate: np.ndarray, cost_per_run: np.ndarray, challenger: int, reference: int
-) -> tuple[float, float, float]:
-    """One-sided p per axis and their max: does ``challenger`` beat ``reference`` on *both*?
+def _rate_p(rate: np.ndarray, challenger: int, reference: int) -> float:
+    """One-sided bootstrap p that ``challenger``'s success rate exceeds ``reference``'s.
 
-    An intersection–union test. Dominance is a conjunction — cheaper *and* more accurate — so the
-    evidence for it is only as strong as its weakest half, and the max is the p-value. That the
-    two axes need no multiplicity correction is a property of the conjunction, not an oversight:
-    getting lucky on one axis buys nothing when the other must clear as well.
-
-    This is what stops a version buying its way in on price. An arm that is dramatically cheaper
-    but no more accurate scores overwhelming evidence on cost, none on rate, and fails.
+    Size is not tested: it is a fixed property of the artifact, not a sampled quantity, and the
+    baseline (size 0) is the leanest thing possible by definition — so "leaner *and* better than
+    the baseline" is never true and would make every claim vacuous. The claim tested is simply
+    "better"; size is reported beside it as the price paid, and the frontier share says whether
+    that price was justified against the other versions.
     """
     d_rate = rate[:, challenger] - rate[:, reference]
-    d_cost = cost_per_run[:, challenger] - cost_per_run[:, reference]
-    usable = np.isfinite(d_rate) & np.isfinite(d_cost)
-    d_rate, d_cost = d_rate[usable], d_cost[usable]
+    d_rate = d_rate[np.isfinite(d_rate)]
     if not len(d_rate):
-        return 1.0, 1.0, 1.0
+        return 1.0
     floor = 1 / len(d_rate)  # the bootstrap cannot resolve below one resample
-    p_rate = max(float((d_rate <= 0).mean()), floor)
-    p_cost = max(float((d_cost >= 0).mean()), floor)
-    return p_rate, p_cost, max(p_rate, p_cost)
+    return max(float((d_rate <= 0).mean()), floor)
 
 
 @dataclass(frozen=True)
@@ -987,11 +1033,11 @@ class SkillTests:
     Attributes
     ----------
     arms
-        One row per arm: its success rate, cost per run, and the share of resamples in which it
-        sits on the Pareto frontier.
+        One row per arm: its success rate, skill size in bytes, and the share of resamples in
+        which it sits on the (size, rate) Pareto frontier.
     comparisons
-        One row per claim "this version dominates the baseline", with the per-axis deltas, the
-        intersection–union p, and the Holm-adjusted p across them.
+        One row per claim "this version beats the baseline", with the rate delta, the one-sided
+        bootstrap p, and the Holm-adjusted p across them.
     baseline
         The arm everything is measured against — the noskill arm when there is one.
     n_clusters
@@ -1010,18 +1056,20 @@ class SkillTests:
 
 
 def skill_tests(df: pd.DataFrame, *, resamples: int = _BOOTSTRAP_RESAMPLES, seed: int = _BOOTSTRAP_SEED) -> SkillTests:
-    """Test which skill versions beat which, on cost and success rate jointly.
+    """Test which skill versions beat the baseline on success rate, and rank them all by leanness.
 
-    Deliberately reports no single combined score. Folding rate and cost into one number picks an
-    exchange rate between them on the reader's behalf, and that choice decides the answer: a
-    version that is much cheaper while being *worse* at the task can come out ahead. The
-    dominance test in :func:`_dominance_p` requires both axes to improve, so it cannot be bought
-    off that way, and :func:`_frontier_probability` ranks the arms without needing a threshold.
+    Two questions, kept apart on purpose. *Is it better?* is a statistical claim about a sampled
+    quantity (the rate over tasks), so it gets the paired, task-clustered bootstrap and a Holm
+    correction. *Was it worth its size?* is not a hypothesis test — size is fixed per artifact —
+    so it is answered by :func:`_frontier_probability`: how often, across resamples, an arm sits
+    on the (size, rate) frontier, i.e. no smaller skill matches its rate. Folding the two into one
+    score would pick an exchange rate between bytes and success on the reader's behalf, and that
+    choice would decide the answer.
 
     Only the versus-baseline claims are tested — the question the benchmark exists to answer, and
     the family the Holm adjustment covers. Testing every version against every other as well
-    would spend the correction budget on claims nobody makes (whether the *baseline* dominates a
-    skill) and can bury the real result: on a four-arm report it turns a Holm p of 0.03 into 0.15.
+    would spend the correction budget on claims nobody makes and can bury the real result: on a
+    four-arm report it turns a Holm p of 0.03 into 0.15.
 
     Parameters
     ----------
@@ -1032,43 +1080,39 @@ def skill_tests(df: pd.DataFrame, *, resamples: int = _BOOTSTRAP_RESAMPLES, seed
         its own p-values exactly.
     """
     arms = _arms_in_order(df)
-    cost, successes, runs = _cluster_totals(df, arms)
-    n_clusters = len(cost)
+    successes, runs = _cluster_totals(df, arms)
+    n_clusters = len(successes)
     baseline = arms[0] if arms else NOSKILL_ARM  # noskill sorts first when it is present
     if n_clusters < _MIN_CLUSTERS or len(arms) < 2:
-        empty = pd.DataFrame(columns=["challenger", "reference", "d_rate", "d_cost", "p", "p_adjusted"])
+        empty = pd.DataFrame(columns=["challenger", "reference", "d_rate", "p", "p_adjusted"])
         return SkillTests(
-            arms=pd.DataFrame(columns=["arm", "rate", "cost", "frontier"]),
+            arms=pd.DataFrame(columns=["arm", "rate", "size", "frontier"]),
             comparisons=empty,
             baseline=baseline,
             n_clusters=n_clusters,
         )
 
-    rate, cost_per_run = _bootstrap_arms(cost, successes, runs, resamples=resamples, seed=seed)
+    rate = _bootstrap_rates(successes, runs, resamples=resamples, seed=seed)
+    size = _arm_sizes(df, arms)
     with np.errstate(invalid="ignore", divide="ignore"):
         observed_rate = successes.sum(axis=0) / runs.sum(axis=0)
-        observed_cost = cost.sum(axis=0) / runs.sum(axis=0)
     arm_rows = pd.DataFrame(
         {
             "arm": arms,
             "rate": observed_rate,
-            "cost": observed_cost,
-            "frontier": _frontier_probability(rate, cost_per_run),
+            "size": size,
+            "frontier": _frontier_probability(rate, size),
         }
     )
 
     rows = []
     for challenger in range(1, len(arms)):
-        p_rate, p_cost, p = _dominance_p(rate, cost_per_run, challenger, 0)
         rows.append(
             {
                 "challenger": arms[challenger],
                 "reference": baseline,
                 "d_rate": observed_rate[challenger] - observed_rate[0],
-                "d_cost": observed_cost[challenger] - observed_cost[0],
-                "p_rate": p_rate,
-                "p_cost": p_cost,
-                "p": p,
+                "p": _rate_p(rate, challenger, 0),
             }
         )
     comparisons = pd.DataFrame(rows)
@@ -1081,11 +1125,6 @@ def _fmt_delta_rate(value: float) -> str:
     return f"{value * 100:+.1f}pp"
 
 
-def _fmt_delta_cost(value: float) -> str:
-    """A change in cost per run, with the sign outside the currency: ``-$0.083``."""
-    return f"{'+' if value >= 0 else '-'}${abs(value):.3f}"
-
-
 def _fmt_p(p: float) -> str:
     """A p-value at the precision the bootstrap can actually resolve."""
     if not math.isfinite(p):
@@ -1095,15 +1134,14 @@ def _fmt_p(p: float) -> str:
 
 #: The table's columns: (header, field, higher-is-better, formatter). The direction is per column
 #: because "best" does not point one way here — the strongest arm has the *highest* success rate
-#: and the *lowest* cost, and a reader scanning the bold cells for the winner should not have to
+#: and the *smallest* size, and a reader scanning the bold cells for the winner should not have to
 #: keep track of which column runs which way. The first few describe an arm on its own; the rest
 #: compare it with the baseline.
 _TEST_COLUMNS = (
     ("Success rate", "rate", True, lambda v: f"{v:.1%}"),
-    ("Cost / run", "cost", False, lambda v: f"${v:.3f}"),
+    ("Skill size", "size", False, _fmt_bytes),
     ("On frontier", "frontier", True, lambda v: f"{v:.1%}"),
     ("&Delta; rate", "d_rate", True, _fmt_delta_rate),
-    ("&Delta; cost", "d_cost", False, _fmt_delta_cost),
     ("p", "p", False, _fmt_p),
     ("Holm p", "p_adjusted", False, _fmt_p),
 )
@@ -1143,7 +1181,7 @@ def _tests_table_html(tests: SkillTests) -> str:
         # The baseline is not compared with itself: those cells stay empty, and take no part in
         # deciding which value in the column is best.
         records.append(
-            {f: getattr(row, f) for f in ("rate", "cost", "frontier")}
+            {f: getattr(row, f) for f in ("rate", "size", "frontier")}
             | {f: (None if match is None else getattr(match, f)) for f in compared}
         )
     best = [
@@ -1763,22 +1801,24 @@ def render_report(
 <h2>Overview</h2>
 <p class="task-desc">Per-run means over test runs; error bars are standard errors.</p>
 <figure><img alt="Success rate, tokens, cost and time per skill" src="{overview_uri}"></figure>
-<h3 id="tradeoff">Cost vs. success</h3>
+<h3 id="tradeoff">Size vs. success</h3>
 <p class="task-desc">One mark per model and skill version, where colour is the model and shape is
- the skill version. The grey mark pools every model for that version, with standard errors on
- both axes. The staircase is the Pareto frontier: anything below and to the right of it is
- dominated, because something on the line costs less <em>and</em> succeeds more.</p>
-<figure><img alt="Cost per run against success rate, by model and skill version" src="{tradeoff_uri}"></figure>
+ the skill version; the x-axis is the bytes of skill the agent had to read (the baseline reads
+ nothing). The grey mark pools every model for that version, with a standard error on the rate.
+ The staircase is the Pareto frontier: anything below and to the right of it is dominated,
+ because something on the line is no bigger <em>and</em> succeeds more. Dollar cost is not an
+ axis here &mdash; it belongs to the model and the run, not to the skill.</p>
+<figure><img alt="Skill size against success rate, by model and skill version" src="{tradeoff_uri}"></figure>
 <h3 id="dominance">Is the difference real?</h3>
-<p class="task-desc">A version <em>dominates</em> the baseline when it is both cheaper and more
- accurate by more than chance. The two axes are tested separately and the weaker of the two
- p-values is reported, so a version cannot pass on price while being worse at the task.
- Improving both numbers is not enough on its own: a gain the resampling cannot tell apart from
- noise leaves the Holm p high, which says the evidence is thin rather than that the version is
- bad. Best value in each column is <strong>bold</strong>, highest for the rates and lowest for
- cost and for the p-values. <em>On frontier</em> is how often an arm holds the Pareto frontier
- across resamples. Resampling is over the {tests.n_clusters} test tasks, paired across arms, so the
- unit is the task rather than the run.</p>
+<p class="task-desc">A version <em>beats</em> the baseline when its success rate is higher by more
+ than chance. A gain the resampling cannot tell apart from noise leaves the Holm p high, which
+ says the evidence is thin rather than that the version is bad. Size is not tested &mdash; it is a
+ fixed property of the artifact, and no skill is leaner than none &mdash; but it is shown as the
+ price paid, and <em>On frontier</em> says whether that price was justified: how often, across
+ resamples, no smaller skill matches the arm's rate. Best value in each column is
+ <strong>bold</strong>, highest for the rates and lowest for size and for the p-values.
+ Resampling is over the {tests.n_clusters} test tasks, paired across arms, so the unit is the task
+ rather than the run.</p>
 {_tests_table_html(tests)}
 </section>
 <section id="per-task">
@@ -1833,7 +1873,7 @@ def build_report(
     -------
     The rendered :class:`Report` (also written to ``out_path``).
     """
-    df = load_results(runs_root)
+    df = load_results(runs_root, skills_root=skills_root)
     resolve_palette(_models_in_order(df), palette)  # reject a bad palette before writing anything
     out_path = out_path.resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -387,6 +387,9 @@ async def run_once(
         "pkg_version": target.fingerprint,
         "commit": target.commit,
         "skill_hash": skill.hash if skill else None,
+        # Bytes of skill content the agent had available; 0 for the baseline. The report's
+        # leanness axis — recorded per run so it is tied to the exact skill that ran.
+        "skill_bytes": skill.size if skill else 0,
         "skill_name": skill.name if skill else None,
         # Evidence, not configuration: did the agent actually invoke the Skill tool?
         "skill_loaded": skill_loaded,

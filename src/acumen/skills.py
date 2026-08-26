@@ -72,6 +72,10 @@ class Skill:
     name: str
     description: str
     hash: str
+    #: Bytes of skill content (``SKILL.md`` + references) — the leanness axis. Recorded in every
+    #: ``result.json`` as ``skill_bytes`` so the report can trade size against success without
+    #: needing the skill tree at hand. ``0`` is what "no skill" weighs.
+    size: int = 0
 
     @property
     def number(self) -> int:
@@ -137,6 +141,18 @@ def skill_content(directory: Path) -> dict[str, str]:
         except UnicodeDecodeError:
             content[rel] = "<binary file>\n"
     return content
+
+
+def skill_size(directory: Path) -> int:
+    """Total bytes of a skill's content files — what an agent has to read to use it.
+
+    This is the *leanness* measure the report trades against success. Bytes rather than tokens,
+    because bytes are exact, model-independent, and need no tokenizer; and content files only, for
+    the same reason as :func:`skill_hash` — ``meta.json`` never reaches an agent.
+    """
+    if not directory.is_dir():
+        raise SkillError(f"skill directory does not exist: {directory}")
+    return sum(path.stat().st_size for path in content_files(directory))
 
 
 def skill_hash(directory: Path) -> str:
@@ -236,6 +252,7 @@ def load_skill(skills_root: Path, version: str | int, *, expect_name: str | None
         name=name.strip(),
         description=description.strip(),
         hash=skill_hash(directory),
+        size=skill_size(directory),
     )
 
 
