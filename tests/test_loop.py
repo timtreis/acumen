@@ -36,7 +36,7 @@ MODEL = "claude-haiku-4-5-20251001"
 def test_seed_default_is_idempotent_and_reproduces_the_draft_prompt(tmp_path: Path) -> None:
     assert seed_default(tmp_path) == "v1"
     assert seed_default(tmp_path) == "v1"  # idempotent — does not create v2
-    assert rb.load_rulebook(tmp_path, "v1") == DRAFT_PROMPT
+    assert rb.load_rulebook(tmp_path, "v1").text == DRAFT_PROMPT
     assert rb.next_version(tmp_path) == "v2"
 
 
@@ -50,7 +50,7 @@ def test_draft_prompt_with_v1_rulebook_is_byte_identical_to_the_default(tmp_path
         "out": Path("/o"),
         "skill_name": "squidpy",
     }
-    assert draft_prompt(**kwargs) == draft_prompt(**kwargs, template=rb.load_rulebook(tmp_path, "v1"))
+    assert draft_prompt(**kwargs) == draft_prompt(**kwargs, template=rb.load_rulebook(tmp_path, "v1").text)
 
 
 def test_validate_rulebook_rejects_broken_templates_and_accepts_the_default() -> None:
@@ -64,9 +64,9 @@ def test_validate_rulebook_rejects_broken_templates_and_accepts_the_default() ->
 
 
 def test_write_rulebook_is_immutable(tmp_path: Path) -> None:
-    rb.write_rulebook(tmp_path, "v1", DRAFT_PROMPT)
+    rb.write_rulebook(tmp_path, "v1", DRAFT_PROMPT, parent=None, rationale="seed")
     with pytest.raises(RulebookError, match="immutable"):
-        rb.write_rulebook(tmp_path, "v1", DRAFT_PROMPT)
+        rb.write_rulebook(tmp_path, "v1", DRAFT_PROMPT, parent=None, rationale="seed")
 
 
 # ── Scoring ─────────────────────────────────────────────────────────────────────────────
@@ -147,9 +147,10 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, cfg: Config, success_by_arm_
 
     async def fake_improve(*, rulebooks_root, parent_version, **_):
         calls["improve"] += 1
-        text = rb.load_rulebook(rulebooks_root, parent_version) + "\n<!-- tweak -->\n"
-        rb.write_rulebook(rulebooks_root, "v2", text)
-        (rb.rulebook_dir(rulebooks_root, "v2") / "rationale.md").write_text("made the description guidance stronger\n")
+        text = rb.load_rulebook(rulebooks_root, parent_version).text + "\n<!-- tweak -->\n"
+        rb.write_rulebook(
+            rulebooks_root, "v2", text, parent=parent_version, rationale="made the description guidance stronger"
+        )
         return RulebookResult(
             version="v2",
             parent=parent_version,

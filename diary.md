@@ -493,3 +493,27 @@ Real squidpy: `acumen warm` downloaded `merfish.h5ad` (49 MB) into
 `~/.cache/acumen/squidpy-*/datasets/data/anndata/` in 45 s; re-run 9.8 s with no download. Not yet
 proven: a full bench pass reading through the symlink (unit test covers the link; the loader's
 cwd-relative resolution is what the real warm proved). Next: P6-full rulebook artifact.
+
+---
+
+## 2026-08-26 — P6-full: the rulebook as a real artifact
+
+**Change.** `rulebooks.py` now mirrors `skills.py` for real instead of "a versioned file":
+- **Content-hashed** — `rulebook_hash` is `skills.skill_hash` over the same notion of content files,
+  so the two artifact kinds share one hash definition; same text ⇒ same hash regardless of version
+  name, so a score attaches to the *text*.
+- **Immutable, enforced both ways** — `write_rulebook` refuses if the version *directory* exists at
+  all (a half-written version is a collision too) and validates the template before touching disk;
+  `load_rulebook` re-hashes and compares against `meta.json` → an in-place edit raises
+  ("modified since it was written") instead of being silently scored under the old name.
+- **Provenanced** — `meta.json` (version, parent, rationale, hash, feedback) written by the SAME
+  `skills.write_meta`, deliberately: one provenance schema, one reader, one chain from a shipped
+  skill back through the rulebook that drafted it. `seed_default` records its origin; the loop's
+  `rationale.md` side-file is gone (rationale lives in meta). `load_rulebook` returns a `Rulebook`
+  (`.text/.hash/.path`); a pre-provenance dir (no meta) still loads, so the existing squidpy
+  workspace isn't broken.
+- `loop.py` migrated (`.text`, provenance-writing `write_rulebook`, resume reads meta).
+
+**Result.** +8 tests in `tests/test_rulebooks.py` (160 total): provenance chain, same-text-same-hash,
+tamper detection, dir-level immutability, validate-before-write, seed provenance. Ruff clean. Next:
+leanness axis (size, not cost) in report.py.

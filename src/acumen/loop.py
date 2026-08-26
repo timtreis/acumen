@@ -245,7 +245,7 @@ async def improve_rulebook(
     parent = parent_version or rb.latest_version(rulebooks_root)
     if parent is None:
         raise LoopError(f"no rulebook to improve under {rulebooks_root} — seed one first")
-    parent_text = rb.load_rulebook(rulebooks_root, parent)
+    parent_text = rb.load_rulebook(rulebooks_root, parent).text
     new_version = rb.next_version(rulebooks_root)
     if rb.rulebook_dir(rulebooks_root, new_version).exists():
         raise LoopError(f"rulebook {new_version} already exists — versions are immutable")
@@ -330,18 +330,20 @@ async def improve_rulebook(
             raise LoopError(f"the rulebook-improve agent errored: {result.subtype} {result.errors or ''}".strip())
 
         new_text = staged_rulebook.read_text()
+        rationale = _read_rationale(rationale_path, result, parent, new_version)
         try:
-            # write_rulebook validates placeholders — a broken template fails here, not at draft time.
-            rb.write_rulebook(rulebooks_root, new_version, new_text)
+            # write_rulebook validates placeholders — a broken template fails here, not at draft
+            # time — and records parent/rationale/hash in meta.json, the provenance chain.
+            written = rb.write_rulebook(
+                rulebooks_root, new_version, new_text, parent=parent, rationale=rationale, feedback=feedback
+            )
         except rb.RulebookError as err:
             raise LoopError(f"the rulebook-improve agent produced an invalid rulebook: {err}") from err
 
-        rationale = _read_rationale(rationale_path, result, parent, new_version)
-        (rb.rulebook_dir(rulebooks_root, new_version) / "rationale.md").write_text(rationale + "\n")
         return RulebookResult(
             version=new_version,
             parent=parent,
-            path=rb.rulebook_dir(rulebooks_root, new_version) / rb.RULEBOOK_FILE,
+            path=written.path,
             rationale=rationale,
             changed=new_text != parent_text,
             cost_usd=result.total_cost_usd or 0.0,
@@ -423,17 +425,15 @@ async def _ensure_rulebook(
     """
     latest = rb.latest_version(rulebooks_root)
     if latest is not None and latest != baseline_version:
-        text = rb.load_rulebook(rulebooks_root, latest)
-        rationale_file = rb.rulebook_dir(rulebooks_root, latest) / "rationale.md"
-        rationale = (
-            rationale_file.read_text().strip() if rationale_file.is_file() else "(resumed; rationale not recorded)"
-        )
+        resumed = rb.load_rulebook(rulebooks_root, latest)
+        meta = rb.rulebook_meta(rulebooks_root, latest)
+        rationale = meta.rationale if meta is not None and meta.rationale else "(resumed; rationale not recorded)"
         return RulebookResult(
             version=latest,
-            parent=baseline_version,
-            path=rb.rulebook_dir(rulebooks_root, latest) / rb.RULEBOOK_FILE,
+            parent=meta.parent if meta is not None and meta.parent else baseline_version,
+            path=resumed.path,
             rationale=rationale,
-            changed=text != baseline_text,
+            changed=resumed.text != baseline_text,
             cost_usd=0.0,
             turns=0,
             n_train_runs=0,
@@ -491,7 +491,7 @@ async def run_iteration(
             f"expected to start from rulebook v1 but found {baseline_version} — run the loop in a "
             "clean workspace (empty rulebooks/, skills/, runs/)"
         )
-    baseline_text = rb.load_rulebook(rulebooks_root, baseline_version)
+    baseline_text = rb.load_rulebook(rulebooks_root, baseline_version).text
 
     # v1: draft, bench both splits, score.
     skill_v1, cost = await _ensure_skill(
@@ -539,7 +539,7 @@ async def run_iteration(
         stream=stream,
     )
     total_cost += rulebook.cost_usd
-    improved_text = rb.load_rulebook(rulebooks_root, rulebook.version)
+    improved_text = rb.load_rulebook(rulebooks_root, rulebook.version).text
 
     # v2: draft from the improved rulebook, bench the test split, score.
     skill_v2, cost = await _ensure_skill(
