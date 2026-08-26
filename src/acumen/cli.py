@@ -18,7 +18,7 @@ from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_t
 from acumen.folds import FoldError, split_lockbox, write_lockbox
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
-from acumen.loop import CVResult, LoopError, run_cv_iteration, run_iteration
+from acumen.loop import CVResult, LoopError, StopRule, run_iteration, run_loop
 from acumen.mining import (
     SEARCH_INTERVAL_S,
     MineResult,
@@ -720,8 +720,28 @@ def _cmd_loop(args: argparse.Namespace) -> int:
             )
 
     if args.cv:
-        cv = asyncio.run(
-            run_cv_iteration(
+        stop = StopRule(
+            max_iterations=args.iterations,
+            patience=args.patience,
+            min_delta=args.min_delta,
+            max_wallclock_s=args.max_hours * 3600 if args.max_hours else None,
+        )
+        print(
+            f"CV loop: k={args.cv}, up to {stop.max_iterations} iteration(s), patience {stop.patience}"
+            + (f", wall-clock cap {args.max_hours:g}h" if args.max_hours else "")
+            + ("; NO LOCKBOX" if args.no_lockbox else f"; lockbox {args.lockbox}"),
+            flush=True,
+        )
+
+        def on_iteration(i: int, cv: CVResult) -> None:
+            print(f"\n=== iteration {i} ===")
+            _print_cv(cv)
+            diff_path = args.rulebooks / cv.carried.version / f"from-{cv.baseline_version}.diff"
+            diff_path.write_text(cv.rulebook_diff)
+            print(f"  rulebook diff: {diff_path}", flush=True)
+
+        run = asyncio.run(
+            run_loop(
                 cfg=cfg,
                 target=target,
                 skills_root=args.skills,
@@ -730,6 +750,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 tasks=tasks,
                 k=args.cv,
                 seed=args.seed,
+                stop=stop,
                 lockbox_dir=None if args.no_lockbox else args.lockbox,
                 allow_no_lockbox=args.no_lockbox,
                 auth_mode=auth_mode,
@@ -739,6 +760,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 stream=args.stream,
                 headroom_only=args.headroom,
                 on_select=on_select,
+                on_iteration=on_iteration,
                 on_fold=lambda f: print(
                     f"  fold {f.fold.index}: held-out {f.improved_held_out.passed}/{f.improved_held_out.total} "
                     f"vs baseline {f.baseline_held_out.passed}/{f.baseline_held_out.total} ({f.delta_rate:+.0%})",
@@ -747,10 +769,16 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 on_bench_done=on_done,
             )
         )
-        _print_cv(cv)
-        diff_path = args.rulebooks / cv.carried.version / f"from-{cv.baseline_version}.diff"
-        diff_path.write_text(cv.rulebook_diff)
-        print(f"  rulebook diff: {diff_path}")
+        print(f"\n=== loop finished: {run.stopped_because} ===")
+        print(f"  pick by CV: rulebook {run.best_version} (cross-validated held-out pass rate {run.best_cv_rate:.0%})")
+        if run.lockbox_score is not None and run.lockbox_baseline is not None:
+            lb, ls = run.lockbox_baseline, run.lockbox_score
+            print(
+                f"  LOCKBOX (scored once, never selected on): v1 {lb.passed}/{lb.total} ({lb.rate:.0%})  ->  "
+                f"{run.best_version} {ls.passed}/{ls.total} ({ls.rate:.0%})   Δ {run.lockbox_delta:+.0%}"
+            )
+        else:
+            print("  no lockbox — no generalisation claim can be made from this run", file=sys.stderr)
         return 0
 
     result = asyncio.run(
@@ -1100,6 +1128,14 @@ def build_parser() -> argparse.ArgumentParser:
         "report the mean; carry forward the refit on all tasks",
     )
     loop.add_argument("--seed", type=int, default=0, help="fold assignment seed (default 0)")
+    loop.add_argument("--iterations", type=int, default=1, help="with --cv: max rulebook iterations (default 1)")
+    loop.add_argument(
+        "--patience", type=int, default=2, help="with --cv: stop after this many non-improving iterations (2)"
+    )
+    loop.add_argument(
+        "--min-delta", type=float, default=0.0, help="with --cv: CV rate gain that counts as improvement (0)"
+    )
+    loop.add_argument("--max-hours", type=float, help="with --cv: wall-clock cap, checked between iterations")
     loop.add_argument("--lockbox", type=Path, default=Path("lockbox"), help="lockbox dir from `acumen lockbox`")
     loop.add_argument(
         "--no-lockbox", action="store_true", help="run --cv without a lockbox (no generalisation claim possible)"

@@ -21,7 +21,16 @@ from acumen.bench import PlannedRun
 from acumen.config import Config
 from acumen.env import Target
 from acumen.folds import write_lockbox
-from acumen.loop import LoopError, LoopResult, RulebookResult, run_cv_iteration, run_iteration, score
+from acumen.loop import (
+    LoopError,
+    LoopResult,
+    RulebookResult,
+    StopRule,
+    run_cv_iteration,
+    run_iteration,
+    run_loop,
+    score,
+)
 from acumen.paths import RESULT_FILE, RunKey, run_dir
 from acumen.prompts import DRAFT_PROMPT, draft_prompt
 from acumen.rulebooks import RulebookError, seed_default, validate_rulebook
@@ -406,6 +415,103 @@ def test_cv_iteration_requires_a_lockbox_and_refuses_overlap(tmp_path: Path, mon
     # Explicitly waiving the lockbox is allowed, and recorded as absent.
     result = _cv(tmp_path, cfg, tasks, k=2, allow_no_lockbox=True)
     assert result.lockbox is None and len(result.folds) == 2
+
+
+def test_run_loop_stops_on_patience_picks_by_cv_and_opens_the_lockbox_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Iteration 1 lifts the CV rate 0 -> 1; nothing can beat that, so patience=1 stops after iteration 2.
+
+    The pick is v2 (best CV), and the lockbox is benched exactly once for v1 and once for v2 —
+    on the lockbox tasks only, in its own run tree — after all selection is done.
+    """
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    improves: list[dict] = []
+    _install_cv_fakes(monkeypatch, cfg, calls, improves)
+    tasks = [_task(t) for t in ("a", "b", "c", "d")]
+    lockbox = write_lockbox(tmp_path / "lockbox", [_task("z1"), _task("z2")], seed=0, fraction=0.3, dump=dump_tasks)
+    seen: list[tuple[int, str]] = []
+
+    run = asyncio.run(
+        run_loop(
+            cfg=cfg,
+            target=_target(tmp_path),
+            skills_root=tmp_path / "skills",
+            rulebooks_root=tmp_path / "rulebooks",
+            runs_root=tmp_path / "runs",
+            tasks=tasks,
+            k=2,
+            stop=StopRule(max_iterations=5, patience=1),
+            lockbox_dir=lockbox.directory,
+            auth_mode="session",
+            on_iteration=lambda i, r: seen.append((i, r.carried.version)),
+        )
+    )
+
+    assert seen == [(1, "v2"), (2, "v3")]
+    assert run.best_version == "v2" and run.best_cv_rate == 1.0
+    assert "no CV improvement" in run.stopped_because
+    assert rb.available_versions(tmp_path / "rulebooks") == ["v1", "v2", "v3"]
+    # Iteration 2's parent was pinned to v2 (not "latest"), so its fold trees sit under v3/.
+    assert (tmp_path / "rulebooks" / loop_mod.CV_DIRNAME / "v3" / "fold-1").is_dir()
+    # Lockbox: only z1/z2, only the test split, only v1 and v2, in runs/lockbox/.
+    lock_runs = tmp_path / "runs" / loop_mod.LOCKBOX_RUNS_DIRNAME
+    benched = {(p.parts[-5], p.parts[-4], p.parts[-2]) for p in lock_runs.rglob("rep_1")}
+    assert benched == {
+        ("skill_v1", "test", "z1"),
+        ("skill_v1", "test", "z2"),
+        ("skill_v2", "test", "z1"),
+        ("skill_v2", "test", "z2"),
+    }
+    assert run.lockbox_baseline is not None and run.lockbox_baseline.total == 2
+    assert run.lockbox_score is not None and run.lockbox_score.total == 2
+    assert run.lockbox_delta == 0.0  # the fakes fail every non-CV test run, so the honest number is flat
+
+    # A resumed run replays the same chain from disk: same pick, same stop, no agents spawned.
+    calls.update(draft=0, bench=0, improve=0)
+    again = asyncio.run(
+        run_loop(
+            cfg=cfg,
+            target=_target(tmp_path),
+            skills_root=tmp_path / "skills",
+            rulebooks_root=tmp_path / "rulebooks",
+            runs_root=tmp_path / "runs",
+            tasks=tasks,
+            k=2,
+            stop=StopRule(max_iterations=5, patience=1),
+            lockbox_dir=lockbox.directory,
+            auth_mode="session",
+        )
+    )
+    assert (again.best_version, again.stopped_because) == (run.best_version, run.stopped_because)
+    assert calls["draft"] == 0 and calls["improve"] == 0
+
+
+def test_run_loop_wallclock_cap_stops_between_iterations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    _install_cv_fakes(monkeypatch, cfg, calls, [])
+    ticks = iter([0.0, 0.0, 100.0, 100.0, 100.0])  # started, check#1 (ok), check#2 (over)
+
+    run = asyncio.run(
+        run_loop(
+            cfg=cfg,
+            target=_target(tmp_path),
+            skills_root=tmp_path / "skills",
+            rulebooks_root=tmp_path / "rulebooks",
+            runs_root=tmp_path / "runs",
+            tasks=[_task(t) for t in ("a", "b", "c", "d")],
+            k=2,
+            stop=StopRule(max_iterations=5, patience=5, max_wallclock_s=50),
+            allow_no_lockbox=True,
+            auth_mode="session",
+            clock=lambda: next(ticks),
+        )
+    )
+
+    assert len(run.iterations) == 1 and "wall-clock" in run.stopped_because
+    assert run.lockbox_score is None and run.lockbox_delta is None
 
 
 def test_run_iteration_resumes_without_respawning_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -646,3 +646,29 @@ exactly the optimize task ids as evidence, the held-out ids in its guard, and th
 in its deny list; the refit got all tasks with nothing held out; fold scores cover exactly the
 held-out tasks; the linear chain holds only v1→v2. Refusals (no lockbox / overlap) spend nothing.
 Not yet run live — it needs the corpus (and P7 to score the lockbox). Next: P7-full.
+
+---
+
+## 2026-08-27 — P7-full: the multi-iteration loop, stopping rules, and the lockbox verdict
+
+**Change.** `loop.run_loop` iterates `run_cv_iteration` with each iteration's parent/carried versions
+**pinned** (`v{i}` → `v{i+1}`; `_ensure_rulebook(expect_version=…)` and `run_cv_iteration(parent_version=…)`),
+so a resumed loop replays the same chain from disk without re-running agents — the previous
+"latest version is the improved one" logic would have mis-resumed a three-version chain.
+`StopRule`: `patience` (consecutive iterations whose cross-validated held-out rate does not beat the
+best by `min_delta`), `max_iterations`, and a wall-clock cap checked between iterations. The pick is
+the version with the best **absolute** CV held-out rate (`_cv_rates`: mean over folds of the
+carried skill's held-out rate; the seed's own CV rate is the bar the first improvement must clear).
+Then, once, the pick and the seed are benched on the **lockbox** tasks into `runs/lockbox/` (a tree
+denied to every improve agent, so a later iteration can't learn from an earlier lockbox result);
+"scored once" is file-presence resume. `LoopRun.lockbox_delta` is the one honest number.
+`acumen loop --cv K --iterations N --patience P [--min-delta] [--max-hours H]` prints per-iteration
+CV tables, the pick, and the LOCKBOX line. Headroom selection is made once (iteration 1) and the
+same tasks are scored thereafter, or CV numbers wouldn't compare across versions.
+
+**Result.** +2 tests (190): patience stop after a plateau, pick = v2, iteration 2's fold trees under
+`cv/v3/` (parent pinned), lockbox benched exactly {v1, v2} × {z1, z2} × test in its own tree, resume
+spawns zero agents and reproduces the pick; wall-clock cap stops between iterations with no lockbox
+eval when waived. Ruff clean. The build plan's seven modules are now all built; the fleet is still
+generating the corpus (2/80 shards at +10 min). Not yet run live: `--cv` end to end (needs the
+corpus + a lockbox).

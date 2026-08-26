@@ -35,6 +35,7 @@ import difflib
 import json
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,7 +48,7 @@ from acumen.config import Config
 from acumen.difficulty import HeadroomSelection, screen, select_headroom
 from acumen.draft import draft_skill
 from acumen.env import AuthMode, Target, build_agent_env
-from acumen.folds import Fold, FoldError, Lockbox, check_disjoint, make_folds, read_lockbox
+from acumen.folds import Fold, FoldError, Lockbox, check_disjoint, load_lockbox_tasks, make_folds, read_lockbox
 from acumen.improve import (
     _read_rationale,
     _write_material,
@@ -433,14 +434,27 @@ async def _ensure_rulebook(
     stream: bool,
     deny_dirs: Sequence[Path] = (),
     log_name: str = "loop-rulebook-v2",
+    expect_version: str | None = None,
 ) -> RulebookResult:
     """Improve the rulebook, or — on a resumed run — reconstruct the already-improved version.
 
-    Keeps the loop resumable: if a version past the baseline already exists on disk, the (expensive)
+    Keeps the loop resumable: if the improved version already exists on disk, the (expensive)
     improve agent is not re-run; its recorded rationale is read back so the report is still complete.
+    ``expect_version`` pins which version counts as "the improved one" — a multi-iteration loop
+    resuming iteration 1 of a three-version chain must reconstruct ``v2``, not the latest ``v3``.
+    Without it, the latest version past the baseline is taken (the single-iteration behaviour).
     """
-    latest = rb.latest_version(rulebooks_root)
-    if latest is not None and latest != baseline_version:
+    latest = expect_version if expect_version in rb.available_versions(rulebooks_root) else None
+    if expect_version is None:
+        latest = rb.latest_version(rulebooks_root)
+        if latest == baseline_version:
+            latest = None
+    elif latest is None and rb.next_version(rulebooks_root) != expect_version:
+        raise LoopError(
+            f"expected to write rulebook {expect_version} but the chain's next version is "
+            f"{rb.next_version(rulebooks_root)} — the rulebook chain is not linear; run in a clean workspace"
+        )
+    if latest is not None:
         resumed = rb.load_rulebook(rulebooks_root, latest)
         meta = rb.rulebook_meta(rulebooks_root, latest)
         rationale = meta.rationale if meta is not None and meta.rationale else "(resumed; rationale not recorded)"
@@ -657,6 +671,10 @@ async def run_iteration(
 #: procedure buys on unseen analyses, not a version anything is carried forward from.
 CV_DIRNAME = "cv"
 
+#: Subdirectory under runs/ holding the lockbox evaluations — denied to every improve agent, since a
+#: later iteration must not learn anything from how an earlier version did on the lockbox.
+LOCKBOX_RUNS_DIRNAME = "lockbox"
+
 
 @dataclass(frozen=True)
 class FoldResult:
@@ -742,6 +760,7 @@ async def run_cv_iteration(
     seed: int = 0,
     lockbox_dir: Path | None = None,
     allow_no_lockbox: bool = False,
+    parent_version: str | None = None,
     auth_mode: AuthMode = "session",
     max_concurrency: int | None = None,
     task_ids: Sequence[str] | None = None,
@@ -821,9 +840,19 @@ async def run_cv_iteration(
 
     # Shared: the parent rulebook, the skill drafted from it, and its bench on every working task.
     baseline_version = rb.seed_default(rulebooks_root)
-    parent_version = rb.latest_version(rulebooks_root) or baseline_version
+    parent_version = parent_version or rb.latest_version(rulebooks_root) or baseline_version
     parent_text = rb.load_rulebook(rulebooks_root, parent_version).text
-    carried_version = rb.next_version(rulebooks_root)
+    # The carried version is pinned to parent+1 so a resumed multi-iteration loop replays each
+    # iteration against the same versions it wrote the first time.
+    carried_version = f"v{version_number(parent_version) + 1}"
+    if (
+        carried_version not in rb.available_versions(rulebooks_root)
+        and rb.next_version(rulebooks_root) != carried_version
+    ):
+        raise LoopError(
+            f"rulebook {parent_version} is not the head of a linear chain (next would be "
+            f"{rb.next_version(rulebooks_root)}, iteration wants {carried_version}); run in a clean workspace"
+        )
     parent_skill_version = f"v{version_number(parent_version)}"
     skill_parent, cost = await _ensure_skill(
         cfg=cfg,
@@ -855,7 +884,7 @@ async def run_cv_iteration(
     # Denied to every improve agent this iteration: the lockbox and all CV trees (a fold must not
     # read another fold's held-out runs, which may be its own optimize tasks' answers).
     cv_root = runs_root / CV_DIRNAME
-    deny_dirs: list[Path] = [cv_root]
+    deny_dirs: list[Path] = [cv_root, runs_root / LOCKBOX_RUNS_DIRNAME]
     if lockbox is not None:
         deny_dirs.append(lockbox.directory)
 
@@ -957,6 +986,7 @@ async def run_cv_iteration(
         stream=stream,
         deny_dirs=deny_dirs,
         log_name=f"loop-rulebook-{carried_version}",
+        expect_version=carried_version,
     )
     total_cost += carried.cost_usd
     carried_text = rb.load_rulebook(rulebooks_root, carried.version).text
@@ -1009,4 +1039,220 @@ async def run_cv_iteration(
         cost_usd=total_cost,
         lockbox=lockbox,
         selection=selection,
+    )
+
+
+# ── The multi-iteration loop (P7) ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class StopRule:
+    """When the outer loop stops. Every rule is a hard cap; the loop halts on the first one hit.
+
+    ``patience`` is the scientific rule: stop once ``patience`` consecutive iterations fail to raise
+    the cross-validated held-out rate above the best seen by more than ``min_delta``. The others
+    are budget caps — iterations and wall-clock — so an unattended run cannot run away. Wall-clock
+    is checked *between* iterations (an iteration is not interrupted; it is resumable anyway).
+    """
+
+    max_iterations: int = 5
+    patience: int = 2
+    min_delta: float = 0.0
+    max_wallclock_s: float | None = None
+
+
+@dataclass(frozen=True)
+class LoopRun:
+    """The outcome of the outer loop: the iterations, the version it chose, and the lockbox verdict."""
+
+    iterations: list[CVResult]
+    #: The rulebook version with the best cross-validated held-out rate — the loop's pick.
+    best_version: str
+    best_cv_rate: float
+    stopped_because: str
+    #: The chosen version's skill on the lockbox tasks (test split), scored once, after every
+    #: selection was made. ``None`` without a lockbox.
+    lockbox_score: Score | None = None
+    #: The seed version's skill on the same lockbox tasks — the floor the pick is compared to.
+    lockbox_baseline: Score | None = None
+    cost_usd: float = 0.0
+
+    @property
+    def lockbox_delta(self) -> float | None:
+        """Lockbox pass-rate change from the seed version to the pick — the one honest number."""
+        if self.lockbox_score is None or self.lockbox_baseline is None:
+            return None
+        return self.lockbox_score.rate - self.lockbox_baseline.rate
+
+
+def _cv_rates(result: CVResult) -> tuple[float, float]:
+    """(parent, carried) cross-validated held-out pass rates — absolute, so versions compare."""
+    if not result.folds:
+        return 0.0, 0.0
+    parent = sum(f.baseline_held_out.rate for f in result.folds) / len(result.folds)
+    carried = sum(f.improved_held_out.rate for f in result.folds) / len(result.folds)
+    return parent, carried
+
+
+async def _lockbox_eval(
+    *,
+    cfg: Config,
+    target: Target,
+    skills_root: Path,
+    runs_root: Path,
+    version: str,
+    tasks: Sequence[Task],
+    auth_mode: AuthMode,
+    max_concurrency: int,
+    on_bench_start: Callable[[PlannedRun], None] | None,
+    on_bench_done: Callable[[RunOutcome], None] | None,
+) -> Score:
+    """Score one skill version on the lockbox tasks' test split, into its own run tree.
+
+    Resumable by file presence, which is what "scored once" means operationally: a version is
+    benched on the lockbox at most once, however many times the loop is re-run.
+    """
+    skill = load_skill(skills_root, version, expect_name=cfg.skill_name)
+    planned = await _bench(
+        cfg=cfg,
+        target=target,
+        skill=skill,
+        tasks=tasks,
+        runs_root=runs_root / LOCKBOX_RUNS_DIRNAME,
+        splits=["test"],
+        auth_mode=auth_mode,
+        task_ids=None,
+        max_concurrency=max_concurrency,
+        on_start=on_bench_start,
+        on_done=on_bench_done,
+    )
+    return score(runs_root / LOCKBOX_RUNS_DIRNAME, planned)
+
+
+async def run_loop(
+    *,
+    cfg: Config,
+    target: Target,
+    skills_root: Path,
+    rulebooks_root: Path,
+    runs_root: Path,
+    tasks: Sequence[Task],
+    k: int = 3,
+    seed: int = 0,
+    stop: StopRule = StopRule(),
+    lockbox_dir: Path | None = None,
+    allow_no_lockbox: bool = False,
+    auth_mode: AuthMode = "session",
+    max_concurrency: int | None = None,
+    task_ids: Sequence[str] | None = None,
+    feedback: str | None = None,
+    log_dir: Path | None = None,
+    stream: bool = False,
+    headroom_only: bool = False,
+    clock: Callable[[], float] = time.monotonic,
+    on_select: Callable[[HeadroomSelection], None] | None = None,
+    on_iteration: Callable[[int, CVResult], None] | None = None,
+    on_fold: Callable[[FoldResult], None] | None = None,
+    on_bench_start: Callable[[PlannedRun], None] | None = None,
+    on_bench_done: Callable[[RunOutcome], None] | None = None,
+) -> LoopRun:
+    """Iterate :func:`run_cv_iteration` until a :class:`StopRule` fires, pick by CV, then open the lockbox.
+
+    Iteration ``i`` improves rulebook ``v{i}`` into ``v{i+1}`` (pinned, so a resumed loop replays the
+    same chain from disk without re-running agents). After each, the carried version's
+    cross-validated held-out rate is compared with the best so far; the loop stops on ``patience``
+    non-improving iterations, on ``max_iterations``, or when the wall-clock cap would be exceeded.
+
+    Selection happens on CV scores only — which is exactly why they are optimistic — and then, once,
+    the chosen version and the seed version are benched on the **lockbox** tasks, a set nothing in
+    the loop ever read. The lockbox delta is the loop's one honest generalisation number; the CV
+    numbers are its working estimates.
+    """
+    started = clock()
+    concurrency = max_concurrency or cfg.max_concurrency
+    history: list[CVResult] = []
+    best_version = rb.seed_default(rulebooks_root)
+    best_rate = -1.0
+    without_improvement = 0
+    reason = f"reached max_iterations={stop.max_iterations}"
+    total_cost = 0.0
+
+    for i in range(stop.max_iterations):
+        if stop.max_wallclock_s is not None and clock() - started >= stop.max_wallclock_s:
+            reason = f"wall-clock cap of {stop.max_wallclock_s:.0f}s reached before iteration {i + 1}"
+            break
+        parent = f"v{i + 1}"
+        result = await run_cv_iteration(
+            cfg=cfg,
+            target=target,
+            skills_root=skills_root,
+            rulebooks_root=rulebooks_root,
+            runs_root=runs_root,
+            tasks=tasks,
+            k=k,
+            seed=seed,
+            lockbox_dir=lockbox_dir,
+            allow_no_lockbox=allow_no_lockbox,
+            parent_version=parent,
+            auth_mode=auth_mode,
+            max_concurrency=concurrency,
+            task_ids=task_ids,
+            feedback=feedback,
+            log_dir=log_dir,
+            stream=stream,
+            headroom_only=headroom_only and i == 0,
+            on_select=on_select,
+            on_fold=on_fold,
+            on_bench_start=on_bench_start,
+            on_bench_done=on_bench_done,
+        )
+        history.append(result)
+        total_cost += result.cost_usd
+        if result.selection is not None:
+            # The headroom selection is made once, on the first iteration; later iterations must
+            # score the same tasks or the CV numbers are not comparable across versions.
+            tasks = result.selection.selected
+            task_ids = None
+        parent_rate, carried_rate = _cv_rates(result)
+        if i == 0:
+            best_rate = parent_rate  # the seed's own CV rate is the bar the first improvement must clear
+        if on_iteration is not None:
+            on_iteration(i + 1, result)
+        if carried_rate > best_rate + stop.min_delta:
+            best_version, best_rate = result.carried.version, carried_rate
+            without_improvement = 0
+        else:
+            without_improvement += 1
+            if without_improvement >= stop.patience:
+                reason = f"no CV improvement over {best_version} for {stop.patience} iteration(s)"
+                break
+
+    lockbox_score = lockbox_baseline = None
+    box = history[-1].lockbox if history else None
+    if box is not None:
+        lock_tasks = load_lockbox_tasks(box)
+        common = dict(
+            cfg=cfg,
+            target=target,
+            skills_root=skills_root,
+            runs_root=runs_root,
+            tasks=lock_tasks,
+            auth_mode=auth_mode,
+            max_concurrency=concurrency,
+            on_bench_start=on_bench_start,
+            on_bench_done=on_bench_done,
+        )
+        lockbox_baseline = await _lockbox_eval(version="v1", **common)
+        lockbox_score = (
+            lockbox_baseline if best_version == "v1" else await _lockbox_eval(version=best_version, **common)
+        )
+
+    return LoopRun(
+        iterations=history,
+        best_version=best_version,
+        best_cv_rate=max(best_rate, 0.0),
+        stopped_because=reason,
+        lockbox_score=lockbox_score,
+        lockbox_baseline=lockbox_baseline,
+        cost_usd=total_cost,
     )
