@@ -1,32 +1,31 @@
-"""The autoresearch loop — crude P6+P7 prototype: optimize the rulebook, score on held-out.
+"""The autoresearch loop: optimize the *rulebook*, score it on analyses it never saw.
 
-**This is a deliberately crude prototype**, built to answer one feasibility question before we
-invest in P2–P5: *does optimizing the rulebook (the SKILL-generating instructions) — rather than a
-skill directly — actually move a held-out score, and is the failure signal legible enough to drive
-the next rulebook version?* If yes, the real loop (CV over tasks, difficulty strata, coverage, the
-selection-leakage lockbox) is worth building. If the signal is mush, we redesign first.
+The rulebook (:mod:`acumen.rulebooks`) is the SKILL-generating instructions; skills are drafted from
+it and are intermediates. One improvement step reads a drafted skill's **train-split** failure
+evidence and rewrites the rulebook — the instructions, never the instance — then a fresh skill is
+drafted from the new version and benchmarked. Three entry points, in order of honesty:
 
-What it does, one iteration:
+* :func:`run_iteration` — the original single ``v1 -> v2`` step, scored on the tasks' own **test
+  variants**. A *within-task* signal: it says whether a skill memorised an answer, not whether the
+  rulebook generalises. Kept as the quick smoke test it is.
+* :func:`run_cv_iteration` — the same step **cross-validated over tasks** (:mod:`acumen.folds`): per
+  fold the rulebook is improved from the optimize tasks' evidence only, behind a guard that denies the
+  held-out tasks' runs in every split, and scored on the held-out tasks. The mean held-out delta is
+  the estimate; the refit on all working tasks is the version carried forward.
+* :func:`run_loop` — iterates that until a :class:`StopRule` fires, picks the version with the best
+  cross-validated rate, and then — once — benches the pick and the seed on the **lockbox**, the task
+  set nothing in the loop ever read. That delta is the loop's one honest generalisation number.
 
-1. Seed rulebook ``v1`` from the built-in draft prompt (today's drafting behaviour, verbatim).
-2. Draft a skill from ``v1``; benchmark it on the tasks (both splits, on a Claude subscription).
-3. Score the rulebook = the skill's **test-split** pass rate (the held-out variant the skill never
-   had evidence from).
-4. Run the outer-improve agent: it reads ``v1`` + the **train-split** failure evidence and writes
-   rulebook ``v2`` — editing the instructions, never the instance.
-5. Draft a skill from ``v2``; benchmark on the test split; score again. Report ``v1`` vs ``v2``.
+Every boundary is structural: evidence is collected only for the tasks an agent may learn from, and a
+``PreToolUse`` guard (:func:`acumen.improve.make_test_guard`) denies everything else — test splits,
+held-out tasks, the lockbox, the CV and lockbox run trees. Everything resumes by file presence, with
+each iteration's parent/carried versions pinned so a resumed loop replays the same chain.
 
-**What is crude here, and honest about it.** "Held-out" is the existing *within-task* test split
-(``tasks.py`` train/test variants), not a partition of tasks — so leakage protection comes free from
-the same ``runs/*/test/`` guard the skill improver uses, and no new slicing is needed. The real
-CV-over-tasks axis, difficulty strata, coverage-driven generation, warm cache, and the nested-CV
-lockbox are all still ahead (P2–P5). One improvement step only; one model, whatever ``n_replicates``
-the config says. The rulebook artifact itself (:mod:`acumen.rulebooks`) is a versioned file, not the
-content-hashed, meta-tracked artifact the real P6 will be.
+Optional task selection by measured difficulty (``headroom_only``, :mod:`acumen.difficulty`) narrows
+the working set to tasks the no-skill baseline does not already solve, before any agent runs.
 
-Because the inner scoring runs on a subscription, the loop calls the benchmark machinery with
-``auth_mode="session"`` directly — it scores pass rate, not dollars, so it does not need the
-API-metered billing the ``acumen bench`` command forces.
+Scoring runs on a Claude subscription (``auth_mode="session"``): the loop optimizes pass rate and
+skill-load rate, never dollars.
 """
 
 from __future__ import annotations
