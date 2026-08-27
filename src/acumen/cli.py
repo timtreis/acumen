@@ -11,7 +11,7 @@ from pathlib import Path
 
 from acumen.bench import build_matrix, pending, run_matrix, summarize
 from acumen.config import Config, ConfigError, load_config
-from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, measure_coverage
+from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, measure_coverage, skill_mentions
 from acumen.difficulty import HeadroomSelection, screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
@@ -20,6 +20,7 @@ from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
 from acumen.loop import CVResult, LoopError, StopRule, run_iteration, run_loop
 from acumen.mining import (
+    _KNOWN_ALIASES,
     SEARCH_INTERVAL_S,
     MineResult,
     MiningError,
@@ -630,7 +631,30 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
         print("\nfeed these to a targeted run: `acumen coverage --queue | ...` then `acumen tasks --feedback`")
     else:
         print("\nevery inventory symbol is exercised by at least one task — no generation queue")
+    if args.skill:
+        _print_skill_coverage(inventory, coverage.covered, args.skills, args.skill, target.pkg_name)
     return 0
+
+
+def _print_skill_coverage(inventory, covered: frozenset[str], skills_root: Path, version: str, pkg: str) -> None:
+    """Benchmark coverage beside skill coverage: what is verified, what is merely taught, what is neither.
+
+    The loop can only optimize what the benchmark scores, so any symbol the skill teaches but no task
+    exercises is guidance nothing tests — and the leanness pressure has no reason to keep it. This is
+    the map of that gap.
+    """
+    skill = load_skill(skills_root, version)
+    mentioned = skill_mentions(inventory, skill.directory, aliases=[_KNOWN_ALIASES.get(pkg, pkg)])
+    names = inventory.names
+    verified = covered & mentioned
+    taught_only = sorted(mentioned - covered)
+    tested_only = sorted(covered - mentioned)
+    neither = sorted(names - covered - mentioned)
+    print(f"\nskill {version} ({skill.size / 1024:.1f} KB) vs the benchmark, over {len(names)} symbols:")
+    print(f"  taught AND verified:      {len(verified)}")
+    print(f"  taught, never verified:   {len(taught_only)}  {', '.join(taught_only)[:200]}")
+    print(f"  verified, not taught:     {len(tested_only)}  {', '.join(tested_only)[:200]}")
+    print(f"  neither:                  {len(neither)}")
 
 
 def _cmd_lockbox(args: argparse.Namespace) -> int:
@@ -1046,6 +1070,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--scripts", type=Path, help="dir of ground-truth scripts (default: 'scripts/' beside tasks.yaml)"
     )
     coverage_cmd.add_argument("--queue", action="store_true", help="print only the uncovered symbols, one per line")
+    coverage_cmd.add_argument(
+        "--skill", metavar="VERSION", help="also report what this skill version teaches vs what the benchmark verifies"
+    )
+    coverage_cmd.add_argument("--skills", type=Path, default=Path("skills"), help="root of the skill tree")
     coverage_cmd.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
     coverage_cmd.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
     coverage_cmd.set_defaults(func=_cmd_coverage)

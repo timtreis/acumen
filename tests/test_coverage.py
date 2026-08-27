@@ -144,3 +144,34 @@ def test_coverage_empty_inventory() -> None:
     cov = Coverage(inventory=Inventory("p", "1", ()), per_task={})
     assert cov.rate == 0.0
     assert cov.uncovered == ()
+
+
+def test_mention_references_reads_prose_and_aliases() -> None:
+    from acumen.coverage import mention_references
+
+    text = (
+        "Build the graph with `sq.gr.spatial_neighbors(adata)` then run sq.gr.nhood_enrichment.\n"
+        "```python\nsquidpy.pl.spatial_scatter(adata)\n```\nUnrelated: np.mean, mysq.gr.fake, sq.gr\n"
+    )
+    refs = mention_references(text, "squidpy", aliases=["sq"])
+    assert refs == {
+        "squidpy.gr.spatial_neighbors",
+        "squidpy.gr.nhood_enrichment",
+        "squidpy.pl.spatial_scatter",
+        "squidpy.gr",
+    }
+    # Without the alias, the `sq.` spellings are invisible — the caller must say what the package is called.
+    assert mention_references(text, "squidpy") == {"squidpy.pl.spatial_scatter"}
+
+
+def test_skill_mentions_counts_only_inventory_symbols(tmp_path: Path) -> None:
+    from acumen.coverage import skill_mentions
+
+    inv = _inv("squidpy.gr.spatial_neighbors", "squidpy.gr.nhood_enrichment", "squidpy.im.process")
+    skill = tmp_path / "v1"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: squidpy\ndescription: x\n---\nUse sq.gr.spatial_neighbors first.\n")
+    (skill / "references" / "images.md").write_text("`sq.im.process` smooths; sq.gr.made_up does not exist.\n")
+    (skill / "meta.json").write_text('{"note": "sq.gr.nhood_enrichment"}')  # bookkeeping, not content
+
+    assert skill_mentions(inv, skill, aliases=["sq"]) == {"squidpy.gr.spatial_neighbors", "squidpy.im.process"}

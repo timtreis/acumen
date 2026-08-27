@@ -32,6 +32,7 @@ import importlib
 import inspect
 import json
 import pkgutil
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -383,6 +384,50 @@ def measure_coverage(inventory: Inventory, scripts: Mapping[str, str]) -> Covera
         except SyntaxError:
             per_task[task_id] = frozenset()
     return Coverage(inventory=inventory, per_task=per_task)
+
+
+def mention_references(text: str, pkg_name: str, *, aliases: Sequence[str] = ()) -> set[str]:
+    """Package-qualified dotted names *mentioned* anywhere in ``text`` — prose, backticks, code.
+
+    The counterpart of :func:`scan_references` for documents that are not Python: a ``SKILL.md``
+    says ``sq.gr.spatial_neighbors`` in a sentence or a fenced block and never imports anything, so
+    an AST cannot see it. A regex over ``<pkg>.<a>.<b>`` and ``<alias>.<a>.<b>`` spellings can, and
+    for a skill that is the honest question — *does it teach this symbol at all?* Conservative in
+    the same direction as the AST scan: a name the text does not spell out is not mentioned.
+
+    Parameters
+    ----------
+    aliases
+        Import aliases to accept as the package (``["sq"]`` for squidpy) — skills use the
+        conventional alias without ever importing it.
+    """
+    heads = "|".join(re.escape(h) for h in (pkg_name, *aliases))
+    pattern = re.compile(rf"(?<![\w.])(?:{heads})((?:\.[A-Za-z_]\w*)+)")
+    found: set[str] = set()
+    for match in pattern.finditer(text):
+        found.add(f"{pkg_name}{match.group(1)}")
+    return found
+
+
+def skill_mentions(inventory: Inventory, skill_dir: Path, *, aliases: Sequence[str] = ()) -> frozenset[str]:
+    """Inventory symbols a skill's content files mention — what the skill *teaches*.
+
+    Set beside :attr:`Coverage.covered` this gives the two numbers that matter for a skill: what the
+    benchmark verifies, and what the skill claims. Their difference is the guidance nothing tests.
+    """
+    from acumen.skills import content_files
+
+    mentioned: set[str] = set()
+    names = inventory.names
+    for path in content_files(skill_dir):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        # A mention of `sq.gr.spatial_neighbors(adata)` also spells every prefix; only whole
+        # inventory names count, so `sq.gr` alone is not a symbol.
+        mentioned |= mention_references(text, inventory.package, aliases=aliases) & names
+    return frozenset(mentioned)
 
 
 def load_scripts(scripts_dir: Path) -> dict[str, str]:
