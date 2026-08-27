@@ -50,6 +50,26 @@ class RunOutcome:
     payload: dict
 
 
+#: Substrings of an agent error that mark it as the platform's problem, not the run's: the
+#: subscription session/usage limit, API rate limiting, overload. Matched case-insensitively.
+_TRANSIENT_MARKERS = ("session limit", "usage limit", "rate limit", "rate_limit", "overloaded", " 429", " 529")
+
+
+def is_transient(error: str) -> bool:
+    """Whether an agent error is a transient platform failure that a later retry would not hit."""
+    lower = f" {error.lower()}"
+    return any(marker in lower for marker in _TRANSIENT_MARKERS)
+
+
+class TransientLimitError(RuntimeError):
+    """A pass stopped because the platform refused runs (session/usage/rate limit).
+
+    Raised by :func:`acumen.bench.run_matrix` after the pass has wound down, so a caller (the CLI, the
+    loop) stops instead of proceeding on a partial matrix. Nothing was recorded for the refused runs;
+    rerunning resumes exactly there.
+    """
+
+
 def _terminal_reason(message: ResultMessage) -> Reason | None:
     """Map a cap breach or hard error onto a reason, or ``None`` if the agent finished.
 
@@ -355,6 +375,20 @@ async def run_once(
         rendered = render_transcript(run_dir / TRANSCRIPT_JSONL, run_dir / TRANSCRIPT_HTML)
         if expected_skill is not None:
             skill_loaded = _skill_fired(run_dir / TRANSCRIPT_JSONL, expected_skill)
+
+    # A transient platform failure (subscription session limit, rate limit, overload) says nothing
+    # about the task or the skill. Recording it as a completed failed run would (a) let resume skip
+    # it forever and (b) feed it to the improver as evidence — the first live CV loop wrote 54 such
+    # "failures" in minutes when the session limit hit mid-bench. So: no result.json, and the
+    # outcome is flagged so the matrix stops launching runs into the same wall.
+    transient_msg = error or ((result.errors and " ".join(map(str, result.errors))) if result else None)
+    if transient_msg and is_transient(str(transient_msg)):
+        return RunOutcome(
+            key=key,
+            success=False,
+            reason="error",
+            payload={"transient": True, "error": str(transient_msg)[:300], "task_id": key.task_id},
+        )
 
     grade: Grade = grade_run(run_dir, split.answer)
     if error is not None or result is None:

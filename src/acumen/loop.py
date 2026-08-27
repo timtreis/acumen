@@ -58,7 +58,7 @@ from acumen.logs import LiveLog
 from acumen.paths import RESULT_FILE, SPLITS, Split, arm_name, is_complete, run_dir
 from acumen.procs import label_env, reap
 from acumen.prompts import rulebook_improve_prompt
-from acumen.runner import RunOutcome
+from acumen.runner import RunOutcome, TransientLimitError, is_transient
 from acumen.skills import Skill, available_versions, load_skill, version_number
 from acumen.tasks import Task
 
@@ -335,13 +335,24 @@ async def improve_rulebook(
                 log.finalize(config_dir=config_dir, work_dir=work, result=result)
 
         if agent_error is not None:
+            if is_transient(str(agent_error)):
+                raise TransientLimitError(
+                    f"the platform refused the rulebook-improve agent ({str(agent_error)[:160]}); nothing was "
+                    "written — rerun to resume once the limit resets"
+                ) from agent_error
             raise LoopError(f"the rulebook-improve agent failed: {type(agent_error).__name__}: {agent_error}") from (
                 agent_error
             )
         if result is None:
             raise LoopError("the rulebook-improve agent produced no result message")
         if result.is_error:
-            raise LoopError(f"the rulebook-improve agent errored: {result.subtype} {result.errors or ''}".strip())
+            detail = f"{result.subtype} {' '.join(map(str, result.errors or []))}".strip()
+            if is_transient(detail):
+                raise TransientLimitError(
+                    f"the platform refused the rulebook-improve agent ({detail[:160]}); nothing was written — "
+                    "rerun to resume once the limit resets"
+                )
+            raise LoopError(f"the rulebook-improve agent errored: {detail}")
 
         new_text = staged_rulebook.read_text()
         rationale = _read_rationale(rationale_path, result, parent, new_version)
@@ -1230,17 +1241,17 @@ async def run_loop(
     box = history[-1].lockbox if history else None
     if box is not None:
         lock_tasks = load_lockbox_tasks(box)
-        common = dict(
-            cfg=cfg,
-            target=target,
-            skills_root=skills_root,
-            runs_root=runs_root,
-            tasks=lock_tasks,
-            auth_mode=auth_mode,
-            max_concurrency=concurrency,
-            on_bench_start=on_bench_start,
-            on_bench_done=on_bench_done,
-        )
+        common = {
+            "cfg": cfg,
+            "target": target,
+            "skills_root": skills_root,
+            "runs_root": runs_root,
+            "tasks": lock_tasks,
+            "auth_mode": auth_mode,
+            "max_concurrency": concurrency,
+            "on_bench_start": on_bench_start,
+            "on_bench_done": on_bench_done,
+        }
         lockbox_baseline = await _lockbox_eval(version="v1", **common)
         lockbox_score = (
             lockbox_baseline if best_version == "v1" else await _lockbox_eval(version=best_version, **common)

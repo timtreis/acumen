@@ -746,3 +746,24 @@ Per iteration: parent draft + bench (28 × 2 splits), 3 × (fold improve → dra
 improve → draft → bench; then the one-shot lockbox eval (36 tasks × {v1, pick}). Expect ~3–4 h per
 iteration; the session limit may pause it (everything resumes by file). The number to read at the
 end is the **LOCKBOX Δ** line.
+
+---
+
+## 2026-08-27 — Session-limit hits must never become recorded runs (first live loop, paused)
+
+**What happened.** The first live `loop --cv` drafted skill v1 and started its 56-run bench just as
+the subscription **session limit** hit. `bench` records an agent error as a *completed failed run*,
+so in a few minutes it wrote **54 error result.json files**; the rulebook-improve agent then failed
+on the same limit and the loop exited. On resume those 54 would have been kept (file presence) and
+handed to the improve agent as "the skill failed everything" — evidence about the platform, not the
+skill. Purged them by hand (54 dirs; the 2 genuine runs kept) and scheduled the relaunch for after
+the reset (20:42).
+
+**Fix (structural).** `runner.is_transient` recognises session/usage/rate-limit and overload errors;
+`run_once` returns such an outcome flagged `transient` **without writing result.json** (so resume
+re-runs it). `bench.run_matrix` **pauses** after the first transient outcome — every still-queued run
+is skipped, nothing thrown at the wall — and then raises `TransientLimitError` so no caller scores a
+partial matrix; the CLI prints "paused: … rerun to resume" (exit 3). `improve_rulebook` raises the
+same for a refused improve agent. +2 tests (193): order-independent (as_completed launches in
+arbitrary order — my first version assumed it didn't), asserting the genuine run is the only
+result.json and the queued runs never launch.

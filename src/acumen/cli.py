@@ -33,7 +33,7 @@ from acumen.mining import (
 from acumen.paths import SPLITS
 from acumen.report import ReportError, build_report
 from acumen.rulebooks import RulebookError
-from acumen.runner import RunOutcome, StderrFilter
+from acumen.runner import RunOutcome, StderrFilter, TransientLimitError
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
 from acumen.skills import SkillError, available_versions, latest_version, load_skill
@@ -1211,6 +1211,9 @@ def main(argv: list[str] | None = None) -> int:
     ) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
+    except TransientLimitError as err:
+        print(f"\npaused: {err}", file=sys.stderr)
+        return 3
     except KeyboardInterrupt:
         print("\ninterrupted — completed runs are preserved; rerun to resume", file=sys.stderr)
         return 130

@@ -10,7 +10,7 @@ from pathlib import Path
 from acumen.config import Config
 from acumen.env import AuthMode, Target
 from acumen.paths import SPLITS, RunKey, Split, arm_name, is_complete, run_dir
-from acumen.runner import RunOutcome, run_once
+from acumen.runner import RunOutcome, TransientLimitError, run_once
 from acumen.skills import Skill
 from acumen.tasks import Task
 
@@ -168,9 +168,16 @@ async def run_matrix(
     """
     semaphore = asyncio.Semaphore(max_concurrency)
     outcomes: list[RunOutcome] = []
+    # Set by the first transient (limit) failure: every run still queued is then skipped instead of
+    # being thrown at the same wall, and the pass ends by raising so nobody scores a partial matrix.
+    paused: list[str] = []
 
     async def one(item: PlannedRun) -> RunOutcome:
         async with semaphore:
+            if paused:
+                return RunOutcome(
+                    key=item.key, success=False, reason="error", payload={"transient": True, "skipped": paused[0]}
+                )
             if on_start is not None:
                 on_start(item)
             outcome = await run_once(
@@ -190,12 +197,20 @@ async def run_matrix(
                 env_passthrough=env_passthrough,
                 dataset_cache_dirs=dataset_cache_dirs,
             )
+            if outcome.payload.get("transient") and not paused:
+                paused.append(str(outcome.payload.get("error", "transient platform error")))
             if on_done is not None:
                 on_done(outcome)
             return outcome
 
     for coro in asyncio.as_completed([one(item) for item in planned]):
         outcomes.append(await coro)
+    if paused:
+        refused = sum(1 for o in outcomes if o.payload.get("transient"))
+        raise TransientLimitError(
+            f"the platform refused runs ({paused[0][:160]}); {refused} of {len(planned)} runs were not "
+            "recorded — rerun the same command to resume them once the limit resets"
+        )
     return outcomes
 
 
