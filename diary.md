@@ -708,3 +708,22 @@ benchmark sandbox. **Fix:** `_run_generation_agent` now runs `make_sync_guard()`
 skill-bias guard (both PreToolUse), and `TASKGEN_PROMPT` states the synchronous rule for all three
 generators (whole / per-notebook / mined). +1 test (191). The retry fleet currently running
 predates the fix; any shard it still fails will be re-run once more with it.
+
+---
+
+## 2026-08-27 — Final corpus (181 tasks), the lockbox is written, baseline bench launched
+
+**Corpus complete.** Two retries finished the fleet: **80/80 shards, 177 tasks** from the top-80
+mined candidates (the two shards that had stalled twice succeeded on the first run *with* the sync
+guard — a direct confirmation of that fix). Merged with the 4 earlier tasks → `tasks_all.yaml`,
+**181 unique ids**; coverage 26/99.
+
+**Lockbox written (once):** `acumen lockbox --fraction 0.2 --seed 0` → **36 tasks held back**
+(`lockbox/`, digest `sha256:bdf3d53d…`), **145 working** (`tasks_all.working.yaml`). From here on
+nothing in the loop may read those 36; the guard denies the directory and the working set is checked
+disjoint before any agent runs.
+
+**Phase 2 running** (`run_phase2.sh`, background): warm the shared dataset cache from the 177
+persisted scripts, then `bench --no-skill --split test` on the 145 working tasks with **sonnet** (the
+new reference model) — the headroom baseline `loop --headroom` will select on — then
+`screen --by-model`. Expect the subscription session limit to pause it once; bench resumes by file.
