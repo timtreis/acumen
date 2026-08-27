@@ -419,6 +419,14 @@ def skill_mentions(inventory: Inventory, skill_dir: Path, *, aliases: Sequence[s
 
     mentioned: set[str] = set()
     names = inventory.names
+    # A bare backticked name (`spatial_neighbors`) counts when exactly one inventory symbol has
+    # that leaf — skills routinely write "call `nhood_enrichment`" without the dotted path. An
+    # ambiguous leaf (`process`, `visium` — several symbols, or a common word) does not count:
+    # crediting it would credit a guess.
+    leaves: dict[str, list[str]] = {}
+    for name in names:
+        leaves.setdefault(name.rsplit(".", 1)[1], []).append(name)
+    unique_leaf = {leaf: owners[0] for leaf, owners in leaves.items() if len(owners) == 1}
     for path in content_files(skill_dir):
         try:
             text = path.read_text(encoding="utf-8")
@@ -427,7 +435,14 @@ def skill_mentions(inventory: Inventory, skill_dir: Path, *, aliases: Sequence[s
         # A mention of `sq.gr.spatial_neighbors(adata)` also spells every prefix; only whole
         # inventory names count, so `sq.gr` alone is not a symbol.
         mentioned |= mention_references(text, inventory.package, aliases=aliases) & names
+        for token in _BACKTICK_RE.findall(text):
+            if token in unique_leaf:
+                mentioned.add(unique_leaf[token])
     return frozenset(mentioned)
+
+
+#: A backticked bare identifier, optionally called: `` `sepal` `` or `` `sepal(...)` ``.
+_BACKTICK_RE = re.compile(r"`([A-Za-z_]\w*)(?:\([^`]*\))?`")
 
 
 def load_scripts(scripts_dir: Path) -> dict[str, str]:

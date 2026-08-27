@@ -390,6 +390,8 @@ def _cmd_tasks(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     if args.model:
         cfg = replace(cfg, tasks_model=args.model)
+    if args.max_concurrency:
+        cfg = replace(cfg, max_concurrency=args.max_concurrency)
 
     out = args.out
     # Fail before the (costly) target prep and agent run if we'd have to clobber.
@@ -1042,6 +1044,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="DIR",
         help="shard over the mined candidate scripts in DIR (from `acumen mine`) instead of notebooks",
+    )
+    tasks_cmd.add_argument(
+        "--max-concurrency", type=int, help="with sharded generation: override config max_concurrency"
     )
     _add_auth_arg(tasks_cmd)
     _add_feedback_arg(tasks_cmd, extra=" (e.g. which functionality to skip or focus on)")

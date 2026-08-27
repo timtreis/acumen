@@ -175,3 +175,17 @@ def test_skill_mentions_counts_only_inventory_symbols(tmp_path: Path) -> None:
     (skill / "meta.json").write_text('{"note": "sq.gr.nhood_enrichment"}')  # bookkeeping, not content
 
     assert skill_mentions(inv, skill, aliases=["sq"]) == {"squidpy.gr.spatial_neighbors", "squidpy.im.process"}
+
+
+def test_skill_mentions_credits_unique_bare_backticked_names(tmp_path: Path) -> None:
+    from acumen.coverage import skill_mentions
+
+    inv = _inv("squidpy.gr.sepal", "squidpy.gr.ligrec", "squidpy.pl.ligrec", "squidpy.im.process")
+    skill = tmp_path / "v1"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: s\ndescription: x\n---\nRun `sepal(adata, ...)` for SVGs; `ligrec` pairs; then `process` and process.\n"
+    )
+    # `sepal` is unique -> credited. `ligrec` exists in gr AND pl -> ambiguous, not credited.
+    # `process` is unique here but only backticked mentions count, and it is credited as im.process.
+    assert skill_mentions(inv, skill, aliases=["sq"]) == {"squidpy.gr.sepal", "squidpy.im.process"}
