@@ -767,3 +767,26 @@ partial matrix; the CLI prints "paused: … rerun to resume" (exit 3). `improve_
 same for a refused improve agent. +2 tests (193): order-independent (as_completed launches in
 arbitrary order — my first version assumed it didn't), asserting the genuine run is the only
 result.json and the queued runs never launch.
+
+---
+
+## 2026-08-28 — First live CV iteration: fold results, and the pause path proven under fire
+
+**Iteration 1 folds** (28 headroom tasks, sonnet, k=3; parent = rulebook v1 / skill v1):
+- fold 1: held-out **1/10 → 1/10** (+0%)
+- fold 2: held-out **2/9 → 3/9** (+11%) — the first movement on analyses the improve agent never saw
+- fold 3: held-out **4/9 → 4/9** (+0%)
+CV estimate **+3.7%**, spread 11% — one task per fold is ~11%, so iteration 1 is within noise. Side
+signal: skill v1 alone passes **7/28** of tasks the no-skill baseline failed outright (the headroom
+set is 0/28 by construction) — the skill-vs-no-skill effect is real; the open question is whether
+*improving the rulebook* adds to it. Refit (rulebook v2) written; skill v2 drafted.
+
+**The pause path, live.** The session limit hit again mid-way through skill v2's 28-run bench. This
+time: **0 error result.json written**, 17 of 28 runs left unrecorded, the matrix stopped launching,
+`paused: … rerun the same command to resume` (exit 3). Yesterday the same event produced 54 bogus
+failures. Relaunch scheduled for after the reset (01:42); iteration 1 completes with the remaining
+17 runs, then iteration 2 (parent v2 → v3) begins.
+
+**Also today:** `coverage --skill` (taught vs verified, bare-name credit): skill v1 teaches 53/99
+symbols, the benchmark vouches for 24 — 29 taught-but-unverified is the phase-3 target list.
+`run_phase3.sh` prepared (tutorial notebooks → working set; lockbox untouched).
