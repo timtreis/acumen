@@ -47,6 +47,7 @@ from acumen.logs import LiveLog
 from acumen.paths import slugify
 from acumen.procs import label_env, reap
 from acumen.prompts import taskgen_mined_prompt, taskgen_prompt, taskgen_shard_prompt
+from acumen.runner import make_sync_guard
 from acumen.tasks import Task, TaskError, load_tasks, parse_tasks
 
 #: The filename the generation agent writes and we harvest from its work dir.
@@ -450,7 +451,10 @@ async def _run_generation_agent(
         system_prompt={"type": "preset", "preset": "claude_code"},
         # Belt-and-braces over the filtered copy: deny any call that reaches an existing
         # skill/guidance artifact or the original unfiltered source, wherever pointed.
-        hooks={"PreToolUse": [make_skill_guard(target.src_dir)]},
+        # ...and the same sync guard the benchmark runner uses: a generation agent that
+        # backgrounds a slow pipeline then "waits for the notification" ends its turn with no
+        # tasks.yaml — three of eighty mined shards failed exactly that way before this hook.
+        hooks={"PreToolUse": [make_skill_guard(target.src_dir), make_sync_guard()]},
     )
 
     result: ResultMessage | None = None

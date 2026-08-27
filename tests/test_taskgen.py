@@ -259,3 +259,16 @@ def test_write_scripts_roundtrip_and_empty_noop(tmp_path: Path) -> None:
     taskgen.write_scripts({"t1": "x = 1\n", "t2": "y = 2\n"}, dest)
     assert (dest / "t1.py").read_text() == "x = 1\n"
     assert (dest / "t2.py").read_text() == "y = 2\n"
+
+
+def test_generation_prompts_forbid_backgrounding() -> None:
+    """The sync rule reaches every generator: an agent that defers a job ends with no tasks.yaml."""
+    from acumen.prompts import taskgen_mined_prompt, taskgen_prompt
+
+    common = {"package": "pkg", "src": Path("/s"), "python": Path("/p"), "out": Path("/w/tasks.yaml")}
+    for prompt in (
+        taskgen_prompt(**common),
+        taskgen_shard_prompt(**common, notebook="docs/x.ipynb"),
+        taskgen_mined_prompt(**common, analysis=Path("/w/analysis-x.py")),
+    ):
+        assert "SYNCHRONOUSLY" in prompt and "Never background" in prompt

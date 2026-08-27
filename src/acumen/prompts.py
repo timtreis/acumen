@@ -358,6 +358,9 @@ its own — so a task gives the objective and almost nothing else.
   all its docs/tutorials/vignettes. This is the ground truth about what the package does.
 - The package is installed; run `{python}` (also `python` on your PATH) to execute code. Do
   not create virtualenvs and do not install or upgrade packages — work with what is here.
+- Run every command SYNCHRONOUSLY and wait for it to finish. Never background a job or wait
+  for a "notification" — none will ever arrive, and a turn that ends waiting produces nothing.
+  If a pipeline is slow, make it smaller (subsample, fewer permutations) rather than defer it.
 - You have web access if the published docs or tutorials help.
 
 # Ignore any existing skills or agent instructions — deliberately hidden

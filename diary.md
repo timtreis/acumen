@@ -695,3 +695,16 @@ skills, which neutralised the mechanism; headroom must now come from genuinely h
 Next: retry lands → `acumen lockbox` (write-once, so only on the final set) → `bench --no-skill
 --split test` on the working set (headroom only needs the test split; ~166 sonnet runs) →
 `loop --cv 3 --iterations 3 --patience 2 --headroom`.
+
+---
+
+## 2026-08-27 — Task-gen agents stall by backgrounding (fix: the sync guard, now on task-gen too)
+
+**Finding.** The 3 fleet shards that "wrote no tasks.yaml" all ended the same way: the agent
+backgrounded a slow pipeline (Moran's I, feature extraction, a seed-robustness check), then said "I'll
+wait for the notification" and ended its turn — the exact stall the bench runner already guards
+against (`runner.make_sync_guard`, diary 2026-08-19), but the guard had only been wired into the
+benchmark sandbox. **Fix:** `_run_generation_agent` now runs `make_sync_guard()` alongside the
+skill-bias guard (both PreToolUse), and `TASKGEN_PROMPT` states the synchronous rule for all three
+generators (whole / per-notebook / mined). +1 test (191). The retry fleet currently running
+predates the fix; any shard it still fails will be re-run once more with it.
