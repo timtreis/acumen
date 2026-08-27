@@ -727,3 +727,22 @@ disjoint before any agent runs.
 persisted scripts, then `bench --no-skill --split test` on the 145 working tasks with **sonnet** (the
 new reference model) — the headroom baseline `loop --headroom` will select on — then
 `screen --by-model`. Expect the subscription session limit to pause it once; bench resumes by file.
+
+---
+
+## 2026-08-27 — Baseline on the corpus: sonnet no-skill 117/145; 28 hard tasks; first live CV loop launched
+
+**Baseline bench** (`bench --no-skill --split test`, 145 working tasks, sonnet, concurrency 2):
+**117/145 passed (81%) in 2 h 17 m** ($40.19 subscription usage); 28 `wrong_answer`. `screen
+--by-model` → **28 tasks with headroom**, spread over ~20 distinct source analyses (max 2 per
+candidate) — the held-out pool is not one notebook's quirks. 13 datasets were pre-warmed once; the
+bench's own auto-warm was then instant (cache hit) — P3 working at scale.
+
+**Launched** (background, caffeinated, `loop.log`, `logs_loop/`):
+`acumen loop --cv 3 --iterations 3 --patience 2 --max-hours 14 --headroom --lockbox lockbox`
+over the 145 working tasks → headroom narrows to the 28 → 3 folds of ~9 held-out each; fresh
+`skills_all/` + `rulebooks_all/` chains; `runs_all/` (holds the noskill baseline the selection reads).
+Per iteration: parent draft + bench (28 × 2 splits), 3 × (fold improve → draft → held-out bench), refit
+improve → draft → bench; then the one-shot lockbox eval (36 tasks × {v1, pick}). Expect ~3–4 h per
+iteration; the session limit may pause it (everything resumes by file). The number to read at the
+end is the **LOCKBOX Δ** line.
