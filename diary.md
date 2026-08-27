@@ -672,3 +672,26 @@ spawns zero agents and reproduces the pick; wall-clock cap stops between iterati
 eval when waived. Ruff clean. The build plan's seven modules are now all built; the fleet is still
 generating the corpus (2/80 shards at +10 min). Not yet run live: `--cv` end to end (needs the
 corpus + a lockbox).
+
+---
+
+## 2026-08-27 — The corpus lands: 166 tasks, coverage 4 → 26 of 99
+
+**Fleet result** (top-80 mined candidates, sonnet, concurrency 2, 01:19→08:19): **162 tasks from
+74/80 shards, 162 persisted ground-truth scripts, $116.71** of subscription usage. Yield ~2.2 tasks per
+candidate (many 2–3). 6 failed: 3 hit the subscription *session limit* ("resets 9:30am") — a pure
+retry, relaunched with 74 shards cached; 3 agents wrote no `tasks.yaml` (nothing re-groundable on a
+bundled dataset, or out of turns) — recorded, re-runnable.
+
+**Merged corpus**: `tasks_gen.yaml` (3) + `tasks_mined.yaml` (1) + `tasks_mined_top.yaml` (162) →
+`tasks_all.yaml`, **166 unique ids** (validated through the strict loader; shard namespacing made
+the merge trivial). `acumen coverage --tasks tasks_all.yaml`: **26/99 (26%)** of squidpy's public
+API exercised, from 162 scripts; 5 tasks have no script (3 pre-P2b + 2 where the agent didn't save
+one — the soft-failure path, visible not fatal); **73 uncovered symbols** = the generation queue.
+
+**Bench model switched to sonnet** in the workspace config (user decision): haiku never loaded
+skills, which neutralised the mechanism; headroom must now come from genuinely hard tasks.
+
+Next: retry lands → `acumen lockbox` (write-once, so only on the final set) → `bench --no-skill
+--split test` on the working set (headroom only needs the test split; ~166 sonnet runs) →
+`loop --cv 3 --iterations 3 --patience 2 --headroom`.
