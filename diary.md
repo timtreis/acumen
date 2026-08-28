@@ -826,3 +826,21 @@ the means. Nine-or-ten held-out tasks per fold cannot resolve a few-percent effe
 needs to grow (phase 3) before the CV number is worth quoting, and the lockbox (36) is the better
 instrument this run has. Session limit paused the loop a third time (resets 06:40); again 0 bogus
 results, 19/28 runs unrecorded, relaunch scheduled.
+
+---
+
+## 2026-08-28 — Iteration 3 (v3 → v4) is negative; the loop stops on patience; lockbox pending
+
+**Iteration 3 folds** (parent v3): fold 1 **3/10 → 2/10**, fold 2 **2/9 → 0/9**, fold 3 **4/9 → 3/9**
+— all negative, CV **Δ pass −14.4%** (spread 12%), Δ load −3.7%; within-task v3 9/28 → v4 6/28.
+Improving on v3's train evidence made the drafted skill *worse* on analyses it hadn't seen: the first
+clear out-of-sample signal of the run, and the kind of thing within-task scoring could not have shown
+(v3's within-task 9/28 looked like the best version).
+
+**Stop + pick.** Two non-improving iterations (v3 tie, v4 worse) → patience fires; pick by CV =
+**v2**. Lockbox evaluation started (36 tasks × {v1, v2}); the session limit paused it at 9/36 v1 runs
+(0 bogus results, fourth clean pause); relaunch 11:42 → LOCKBOX Δ expected ~13:30.
+
+**Rhythm learned.** Sonnet at concurrency 2 exhausts the subscription's session window roughly every
+5 h of wall-clock; the loop loses ~2 h per pause (reset wait). The pause/resume path has now
+carried the run across four pauses with no lost or corrupted work.
