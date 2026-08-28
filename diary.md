@@ -844,3 +844,34 @@ clear out-of-sample signal of the run, and the kind of thing within-task scoring
 **Rhythm learned.** Sonnet at concurrency 2 exhausts the subscription's session window roughly every
 5 h of wall-clock; the loop loses ~2 h per pause (reset wait). The pause/resume path has now
 carried the run across four pauses with no lost or corrupted work.
+
+---
+
+## 2026-08-28 — The first live CV loop finishes: pick v2, LOCKBOX +3%
+
+**Result** (`loop --cv 3 --iterations 3 --patience 2 --headroom`, 28 hard tasks, sonnet bench; ran
+19:45 → 13:07 across four session-limit pauses):
+
+| iter | rulebook | CV Δ pass | spread | CV Δ load | within-task (optimistic) | size |
+|---|---|---|---|---|---|---|
+| 1 | v1 → v2 | +3.7% | 11% | +10.7% | v1 7/28 → v2 6/28 | 31.1 → 25.6 KB |
+| 2 | v2 → v3 | +7.4% | 22% | −7.0% | v2 6/28 → v3 9/28 | → 27.6 KB |
+| 3 | v3 → v4 | **−14.4%** | 12% | −3.7% | v3 9/28 → v4 6/28 | → 29.7 KB |
+
+Absolute CV held-out rate: v1 ≈ 26%, v2 ≈ 29%, v3 ≈ 29% (tie), v4 ≈ 15% → **pick v2**; stopped on
+patience. **LOCKBOX (36 tasks never read by anything in the loop): v1 26/36 (72%) → v2 27/36 (75%),
+Δ +3%** — two tasks gained (mibitof co-localization, nuclei-max-spot), one lost (H&E Moran top gene).
+v2 is also the *smallest* version (25.6 KB vs v1's 31.1 KB): leaner and no worse.
+
+**Honest reading.** (1) The mechanism works end to end on real data: structural hold-out, pinned
+resume across four pauses, a pick made only on CV, a lockbox opened once. (2) The effect is within
+noise: one task on the lockbox; one or two tasks per fold in CV. Nine-or-ten held-out tasks per fold
+cannot resolve a few-percent effect, and the lockbox is ~72% baseline-solvable so most of its 36
+carry no information about the skill. (3) The one *clear* signal was negative: v4 regressed −14%
+out of sample while looking best within-task (v3 9/28) — exactly the failure mode CV exists to
+catch, and evidence the within-task number would have misled. (4) The improve agent's edits are
+legible and evidence-driven (v3's rationale diagnosed body-vs-description from the 86% load rate).
+
+**What decides the next run:** more headroom tasks per fold (phase 3: tutorial notebooks → the 29
+taught-but-unverified symbols), a noskill bench on the lockbox for the floor, and reporting the
+lockbox Δ on its hard subset. Cost of this run: ~$210 subscription usage over four session windows.
