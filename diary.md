@@ -806,3 +806,23 @@ hash covers every content file, so the version read as tampered. Invisible in si
 (v2 was never reloaded); the tamper check did exactly its job. **Fix:** `rulebooks.diff_path` puts
 diffs under `<root>/diffs/<version>-from-<parent>.diff`, both CLI sites use it, +1 regression test
 (197). Moved the stray file in the workspace; v2 verifies again (`sha256:0172869f…`). Relaunched.
+
+---
+
+## 2026-08-28 — Iteration 2 (v2 → v3); the pause path holds a second time
+
+**Iteration 2 folds** (parent = rulebook v2 / skill v2): fold 1 **1/10 → 1/10**, fold 2 **2/9 → 2/9**,
+fold 3 **3/9 → 5/9 (+22%)**. CV **Δ pass +7.4%** (spread 22%), Δ load −7%. Within-task test:
+v2 6/28 → v3 9/28. Rationale (v3): "12/28 train failures were all wrong_answer with the skill loaded
+(86% load) — the body, not the description, was the lever; three recurring, fixable mistakes in the
+failing scripts…" — evidence-driven and legible.
+
+**Selection so far** (absolute CV held-out rate, mean over folds of the carried skill): v1 ≈ 26%,
+v2 ≈ 29%, v3 ≈ 29% (tie, not > best) → pick stays **v2**, one non-improving iteration against
+patience 2. Iteration 3 (v3 → v4) is the last allowed; then the lockbox (36 tasks × {v1, pick}).
+
+**Observation.** Every gain so far is one fold with 1–2 extra tasks passing; spreads (11–22%) dwarf
+the means. Nine-or-ten held-out tasks per fold cannot resolve a few-percent effect — the corpus
+needs to grow (phase 3) before the CV number is worth quoting, and the lockbox (36) is the better
+instrument this run has. Session limit paused the loop a third time (resets 06:40); again 0 bogus
+results, 19/28 runs unrecorded, relaunch scheduled.
