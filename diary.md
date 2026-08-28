@@ -790,3 +790,19 @@ failures. Relaunch scheduled for after the reset (01:42); iteration 1 completes 
 **Also today:** `coverage --skill` (taught vs verified, bare-name credit): skill v1 teaches 53/99
 symbols, the benchmark vouches for 24 — 29 taught-but-unverified is the phase-3 target list.
 `run_phase3.sh` prepared (tutorial notebooks → working set; lockbox untouched).
+
+---
+
+## 2026-08-28 — Iteration 1 complete; a latent bug the multi-iteration loop exposed (diff inside the version dir)
+
+**Iteration 1 (rulebook v1 → v2), cross-validated over 28 headroom tasks:** CV **Δ pass +3.7%**
+(spread 11.1%), **Δ load +10.7%**; within-task test (optimistic): noskill 0/28 → skill v1 7/28 →
+skill v2 6/28. Rationale of v2: added "test sensitivity, not just existence" guidance to the drafting
+rules. Honest read: no measurable pass gain yet; the load-rate gain is the earlier signal moving.
+
+**Bug.** Starting iteration 2 the loop refused to load v2: *"modified since it was written"*. The
+CLI wrote `from-v1.diff` **inside** `rulebooks/v2/` after `meta.json` had hashed the directory — the
+hash covers every content file, so the version read as tampered. Invisible in single-iteration runs
+(v2 was never reloaded); the tamper check did exactly its job. **Fix:** `rulebooks.diff_path` puts
+diffs under `<root>/diffs/<version>-from-<parent>.diff`, both CLI sites use it, +1 regression test
+(197). Moved the stray file in the workspace; v2 verifies again (`sha256:0172869f…`). Relaunched.

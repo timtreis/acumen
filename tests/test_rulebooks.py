@@ -88,3 +88,15 @@ def test_versions_and_next(tmp_path: Path) -> None:
     assert rb.available_versions(tmp_path) == ["v1", "v2"]
     assert rb.next_version(tmp_path) == "v3"
     assert rb.load_rulebook(tmp_path, 2).number == 2
+
+
+def test_diff_lives_outside_the_version_dir_so_the_hash_holds(tmp_path: Path) -> None:
+    v2 = rb.write_rulebook(tmp_path, "v2", TEMPLATE_B, parent="v1", rationale="x")
+    path = rb.diff_path(tmp_path, "v2", "v1")
+    path.write_text("--- v1\n+++ v2\n")
+    assert path.parent == tmp_path / "diffs" and not path.is_relative_to(v2.directory)
+    assert rb.load_rulebook(tmp_path, "v2") == v2  # still verifies against its recorded hash
+    # The old behaviour — a file dropped into the version dir — is exactly what the check catches.
+    (v2.directory / "from-v1.diff").write_text("x")
+    with pytest.raises(RulebookError, match="modified since"):
+        rb.load_rulebook(tmp_path, "v2")

@@ -80,6 +80,19 @@ def rulebook_dir(rulebooks_root: Path, version: str | int) -> Path:
     return rulebooks_root / name
 
 
+def diff_path(rulebooks_root: Path, version: str, parent: str) -> Path:
+    """Where a version's diff against its parent is written: ``<root>/diffs/<version>-from-<parent>.diff``.
+
+    Deliberately *outside* the version directory. A version dir is hashed over every content file
+    when its ``meta.json`` is written, so anything dropped in afterwards — a diff, a note — makes the
+    version read as tampered the next time it is loaded. The first multi-iteration loop tripped on
+    exactly that, one iteration in.
+    """
+    directory = rulebooks_root / "diffs"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{version}-from-{parent}.diff"
+
+
 def rulebook_hash(directory: Path) -> str:
     """Hash a rulebook version's content — ``"sha256:<hex>"``.
 

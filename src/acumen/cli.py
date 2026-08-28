@@ -34,6 +34,7 @@ from acumen.mining import (
 from acumen.paths import SPLITS
 from acumen.report import ReportError, build_report
 from acumen.rulebooks import RulebookError
+from acumen.rulebooks import diff_path as rulebook_diff_path
 from acumen.runner import RunOutcome, StderrFilter, TransientLimitError
 from acumen.scaffold import InitError, scaffold
 from acumen.ship import ShipError, ship_skill
@@ -762,7 +763,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
         def on_iteration(i: int, cv: CVResult) -> None:
             print(f"\n=== iteration {i} ===")
             _print_cv(cv)
-            diff_path = args.rulebooks / cv.carried.version / f"from-{cv.baseline_version}.diff"
+            diff_path = rulebook_diff_path(args.rulebooks, cv.carried.version, cv.baseline_version)
             diff_path.write_text(cv.rulebook_diff)
             print(f"  rulebook diff: {diff_path}", flush=True)
 
@@ -859,7 +860,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
         print("  note: the improve agent left the rulebook unchanged — no movement is expected", file=sys.stderr)
     print(f"  rulebook rationale: {result.rulebook.rationale}")
 
-    diff_path = args.rulebooks / result.improved_version / f"from-{result.baseline_version}.diff"
+    diff_path = rulebook_diff_path(args.rulebooks, result.improved_version, result.baseline_version)
     diff_path.write_text(result.rulebook_diff)
     print(f"  rulebook diff: {diff_path}  ({result.rulebook_diff.count(chr(10))} lines)")
     print(f"  cost: ${result.cost_usd:.2f}")
