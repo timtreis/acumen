@@ -940,3 +940,24 @@ no-skill baseline copied in — so round 1's version chain and fold trees are ne
 different task set; (3) `loop --cv 3 --iterations 3 --patience 2 --headroom` over the 228, same
 lockbox. Each agent step retries every 30 min on a session-limit pause. The point of the round:
 more headroom tasks per fold, so a few-percent effect can actually be resolved.
+
+---
+
+## 2026-08-30 — Round 2 on the 228-task corpus: iterations 1–2
+
+**Setup.** Baseline on the 83 notebook tasks: 66 ok / 15 wrong / 2 error → **45 headroom tasks**
+(15 per fold, up from 9–10). Round-2 `v1` = round 1's pick (`rulebooks_all/v2`), fresh roots.
+
+| iter | rulebook | folds (held-out Δ) | CV Δ pass | within-task |
+|---|---|---|---|---|
+| 1 | r2-v1 → r2-v2 | +0%, −7%, **+20%** | **+4.4%** (spread 27%) | v1 13/45 → v2 18/45 |
+| 2 | r2-v2 → r2-v3 | **−27%**, +7%, **−20%** | **≈ −13%** | pending (bench paused at 22/45) |
+
+Same shape as round 1: one improvement step from the seed helps a little (carried by one fold), the
+next step from that improved version *hurts* out of sample — and by a lot more than it helped. The
+improve agent, given a train set where the skill already passes ~40%, over-fits the remaining
+failures into rules that break analyses it never saw. Iteration 2's rationale again edited the body.
+
+**Ops.** Four session-limit pauses in this round so far; the `retry` wrapper (12 × 30 min) covered
+three, but a 03:50 reset falls past its last attempt, so a manual relaunch is scheduled for 03:52.
+Consider making the wrapper parse the reset time instead of polling blindly.
