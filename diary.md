@@ -875,3 +875,18 @@ legible and evidence-driven (v3's rationale diagnosed body-vs-description from t
 **What decides the next run:** more headroom tasks per fold (phase 3: tutorial notebooks → the 29
 taught-but-unverified symbols), a noskill bench on the lockbox for the floor, and reporting the
 lockbox Δ on its hard subset. Cost of this run: ~$210 subscription usage over four session windows.
+
+---
+
+## 2026-08-29 — Lockbox floor; phase 3 (tutorial notebooks) launched
+
+**Floor.** `bench --no-skill` on the 36 lockbox tasks (test split, sonnet): **22/36 (61%)**. The full
+lockbox line is now **noskill 22/36 → skill v1 26/36 → rulebook-improved v2 27/36**: the skill itself
+is worth +4 tasks (+11%) on analyses nothing in the loop ever read; one more from the rulebook
+iteration. Same caveat as before — one task is 3%.
+
+**Phase 3 launched** (`run_phase3.sh`, after the floor so the two never share the session window):
+the 50 bundled tutorial notebooks through sharded task-gen (first time at scale — P1's proof was one
+notebook), merged into the *working* set only (the lockbox is write-once and stays exactly as it is),
+then coverage before/after. Target: skill v1's 29 taught-but-unverified symbols (niche, sepal, image
+container, experimental stain/tiling QC). One `chmod +x` I had forgotten cost a 30-minute gap.
