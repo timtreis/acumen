@@ -62,6 +62,10 @@ ENV_ALLOWLIST = (
 
 _BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 
+#: Bash timeout handed to every isolated agent (default and ceiling), in ms — 45 minutes. Long
+#: enough for a heavy analysis step to run inline; see :func:`scrubbed_env` for why that matters.
+BASH_TIMEOUT_MS = 45 * 60 * 1000
+
 
 class EnvError(RuntimeError):
     """Raised when the target cannot be prepared."""
@@ -558,6 +562,14 @@ def scrubbed_env(
     env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     env["TMPDIR"] = str(home / "tmp")
     env["LANG"] = os.environ.get("LANG", "C.UTF-8")
+    # The CLI moves a Bash command that outlives its timeout (2 min by default) to the background
+    # and tells the agent to await a completion notification — which, in a one-shot query, never
+    # comes: the agent "pauses" and the run ends with nothing written. The PreToolUse sync guard
+    # cannot see this (no flag is set on the call), so the fix is upstream: give every isolated
+    # agent a Bash timeout long enough that a real analysis (segmentation, permutation tests)
+    # finishes inline. Identical in both arms, so parity holds.
+    env["BASH_DEFAULT_TIMEOUT_MS"] = str(BASH_TIMEOUT_MS)
+    env["BASH_MAX_TIMEOUT_MS"] = str(BASH_TIMEOUT_MS)
     # Keep pip/uv from reaching into the real user's caches and configs.
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_CACHE_HOME"] = str(home / ".cache")

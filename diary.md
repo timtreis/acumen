@@ -890,3 +890,17 @@ the 50 bundled tutorial notebooks through sharded task-gen (first time at scale 
 notebook), merged into the *working* set only (the lockbox is write-once and stays exactly as it is),
 then coverage before/after. Target: skill v1's 29 taught-but-unverified symbols (niche, sepal, image
 container, experimental stain/tiling QC). One `chmod +x` I had forgotten cost a 30-minute gap.
+
+---
+
+## 2026-08-29 — The stall's real cause: the CLI backgrounds long Bash calls on timeout
+
+A tutorial shard (CellProfiler) stalled again *with* the sync guard active and **zero denied tool
+calls**: "the full-image computation is running in the background (~10 min)… I'll pause here until
+it completes." The agent never asked to background anything — the Claude Code harness moves a Bash
+command that outlives its timeout (2 min default) to the background on its own and tells the agent
+to await a notification that a one-shot query never delivers. No PreToolUse input carries a flag to
+deny, so the guard cannot see it. **Fix upstream:** every isolated agent env now sets
+`BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` to 45 min (`env.BASH_TIMEOUT_MS`), so a real
+analysis step (segmentation, permutation tests) runs inline. Both arms identical (parity). +1 test.
+The running phase-3 fleet imported the old module; shards it fails are re-run afterwards with this.

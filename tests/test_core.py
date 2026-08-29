@@ -1322,3 +1322,16 @@ def test_label_env_marks_a_run_without_disturbing_the_rest(tmp_path: Path) -> No
 
     assert marked.items() >= base.items()
     assert str(holder) in marked.values()
+
+
+def test_scrubbed_env_keeps_long_bash_commands_inline(tmp_path: Path) -> None:
+    """The CLI backgrounds a Bash call that outlives its timeout, which strands a one-shot agent.
+
+    Every isolated agent therefore gets a long Bash timeout (default and ceiling) so a real analysis
+    step runs inline — the sync guard cannot catch the harness doing this on its own.
+    """
+    from acumen.env import BASH_TIMEOUT_MS
+
+    env = scrubbed_env(config_dir=tmp_path / "cfg", home=tmp_path / "home")
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == str(BASH_TIMEOUT_MS) == env["BASH_MAX_TIMEOUT_MS"]
+    assert BASH_TIMEOUT_MS >= 30 * 60 * 1000
