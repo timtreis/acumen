@@ -921,3 +921,22 @@ shards one by one against the same wall (harmless — nothing written — but wa
 `generate_tasks_sharded` now pauses after the first transient shard failure (the rest are
 `skipped:`), still merges what landed, and reports `paused`; the CLI prints the summary then raises
 `TransientLimitError` (exit 3). +1 test (199), order-independent (max_concurrency=1).
+
+---
+
+## 2026-08-29 — Phase 3 complete: 50/50 notebooks → 83 tasks, working set 228; round 2 launched
+
+**Phase 3 run 2** (07:22–09:07, the 17 shards run 1 had left; pause logic + 45-min Bash timeout
+live): all 17 landed, including the CellProfiler notebook that had stalled twice and `tutorial_tf`.
+**50/50 notebooks → 83 tasks.** Merged into the working set only: **228 working tasks**, lockbox
+still exactly its 36. Coverage **29 → 30/99** — smaller than hoped: the notebooks' ground-truth
+scripts exercise mostly the same core calls the mined corpus already did; the remaining queue is
+dominated by `experimental.*` (no public usage exists), `gr.neighbors.*` builders, and `pl.*`.
+
+**Round 2 launched** (`run_round2.sh`): (1) baseline `bench --no-skill --split test` for the 83 new
+tasks (the 145 old ones resume from cache); (2) **fresh roots** — `rulebooks_r2/v1` seeded from
+round 1's CV pick (`rulebooks_all/v2`, provenance recorded), `skills_r2/`, `runs_r2/` with the
+no-skill baseline copied in — so round 1's version chain and fold trees are never mixed with a
+different task set; (3) `loop --cv 3 --iterations 3 --patience 2 --headroom` over the 228, same
+lockbox. Each agent step retries every 30 min on a session-limit pause. The point of the round:
+more headroom tasks per fold, so a few-percent effect can actually be resolved.
