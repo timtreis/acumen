@@ -485,6 +485,12 @@ def _cmd_tasks_sharded(args: argparse.Namespace, cfg: Config, target: Target, ou
         failed = ", ".join(o.slug for o in result.outcomes if o.status == "failed")
         print(f"  failed: {result.n_failed} shards ({failed}) — rerun to retry them", file=sys.stderr)
     print(f"  cost:   ${result.cost_usd:.2f}")
+    if result.paused:
+        skipped = sum(1 for o in result.outcomes if (o.error or "").startswith("skipped:"))
+        raise TransientLimitError(
+            f"the platform refused a shard ({result.paused[:160]}); {skipped} shard(s) were skipped and the "
+            f"merged file holds what landed — rerun the same command to resume them once the limit resets"
+        )
     print("\nnext: review the tasks, then `acumen draft` and `acumen bench`")
     return 0
 

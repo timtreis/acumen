@@ -272,3 +272,32 @@ def test_generation_prompts_forbid_backgrounding() -> None:
         taskgen_mined_prompt(**common, analysis=Path("/w/analysis-x.py")),
     ):
         assert "SYNCHRONOUSLY" in prompt and "Never background" in prompt
+
+
+def test_sharded_generation_pauses_after_a_transient_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A platform limit on one shard must not fail every remaining shard against the same wall."""
+    src = tmp_path / "src"
+    _write_notebooks(src, ["docs/nb/a.ipynb", "docs/nb/b.ipynb", "docs/nb/c.ipynb"])
+    ran: list[str] = []
+
+    async def limited_agent(*, work_root: Path, make_prompt, **_):
+        ran.append(work_root.name)
+        if len(ran) == 1:
+            return [_task("t")], {}, _FakeResult(cost=0.1, turns=1)  # the first shard lands
+        raise TaskGenError("ResultError: You've hit your session limit · resets 7:20am")
+
+    monkeypatch.setattr(taskgen, "_run_generation_agent", limited_agent)
+    cfg = Config(repo=str(src), skill_name="pkg", max_concurrency=1)
+    result = asyncio.run(
+        generate_tasks_sharded(
+            cfg=cfg, target=_target(src), out_path=tmp_path / "tasks.yaml", shards_dir=tmp_path / "shards"
+        )
+    )
+
+    # One landed, one hit the wall, the third was skipped without an agent ever starting.
+    assert len(ran) == 2
+    assert result.paused and "session limit" in result.paused
+    assert result.n_ok == 1 and result.n_failed == 2
+    assert sum(1 for o in result.outcomes if (o.error or "").startswith("skipped:")) == 1
+    assert len(result.tasks) == 1  # the merged file holds what landed
+    assert len(list((tmp_path / "shards").glob("*.yaml"))) == 1  # nothing written for the refused/skipped shards

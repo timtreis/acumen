@@ -47,7 +47,7 @@ from acumen.logs import LiveLog
 from acumen.paths import slugify
 from acumen.procs import label_env, reap
 from acumen.prompts import taskgen_mined_prompt, taskgen_prompt, taskgen_shard_prompt
-from acumen.runner import make_sync_guard
+from acumen.runner import is_transient, make_sync_guard
 from acumen.tasks import Task, TaskError, load_tasks, parse_tasks
 
 #: The filename the generation agent writes and we harvest from its work dir.
@@ -600,6 +600,9 @@ class ShardedResult:
     shards_dir: Path
     outcomes: list[ShardOutcome]
     cost_usd: float
+    #: Set when the platform refused a shard (session/usage/rate limit) and the rest were skipped:
+    #: the merged file holds what landed, and a rerun resumes the skipped shards.
+    paused: str | None = None
 
     @property
     def n_ok(self) -> int:
@@ -783,6 +786,9 @@ async def generate_tasks_sharded(
 
         semaphore = asyncio.Semaphore(max_concurrency or cfg.max_concurrency)
         outcomes: list[ShardOutcome] = []
+        # Set by the first shard the platform refuses (session/usage/rate limit): every shard still
+        # queued is then skipped rather than failed one by one against the same wall.
+        paused: list[str] = []
 
         async def run_shard(shard: tuple[str, Path | None, Path | None]) -> ShardOutcome:
             slug, nb_path, candidate = shard
@@ -798,6 +804,13 @@ async def generate_tasks_sharded(
 
             async with semaphore:
                 pending = ShardOutcome(notebook=notebook, slug=slug, shard_path=shard_path, status="failed")
+                if paused:
+                    # The platform refused an earlier shard: don't throw the rest at the same wall.
+                    # Nothing is written, so a rerun resumes exactly here.
+                    outcome = replace(pending, error=f"skipped: paused after {paused[0][:120]}")
+                    if on_shard_done is not None:
+                        on_shard_done(outcome)
+                    return outcome
                 if on_shard_start is not None:
                     on_shard_start(pending)
                 work_root = holder / "shards" / slug
@@ -864,6 +877,8 @@ async def generate_tasks_sharded(
                         log_html=log.html_path if log is not None and log.html_rendered else None,
                     )
                 except Exception as err:  # noqa: BLE001 - one shard failing must not take the pass down
+                    if is_transient(str(err)) and not paused:
+                        paused.append(str(err))
                     outcome = ShardOutcome(
                         notebook=notebook,
                         slug=slug,
@@ -896,6 +911,7 @@ async def generate_tasks_sharded(
             shards_dir=shards_dir,
             outcomes=outcomes,
             cost_usd=sum(outcome.cost_usd for outcome in outcomes),
+            paused=paused[0] if paused else None,
         )
     finally:
         reap(holder)

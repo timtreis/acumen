@@ -904,3 +904,20 @@ deny, so the guard cannot see it. **Fix upstream:** every isolated agent env now
 `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` to 45 min (`env.BASH_TIMEOUT_MS`), so a real
 analysis step (segmentation, permutation tests) runs inline. Both arms identical (parity). +1 test.
 The running phase-3 fleet imported the old module; shards it fails are re-run afterwards with this.
+
+---
+
+## 2026-08-29 — Phase 3 run 1: 33/50 notebooks → 51 tasks, coverage 26 → 29/99; task-gen learns to pause
+
+**Run 1** (50 tutorial notebooks, sonnet, concurrency 2): **51 tasks from 33 shards**; 17 failed —
+16 on the subscription session limit (resets 07:20), one `ProcessError` (`tutorial_tf`), one
+CellProfiler stall (the harness-timeout backgrounding, fixed above but not yet live in that fleet).
+Merged into `tasks_all_v2.working.yaml` (145 working + 51 = 196; lockbox untouched). Coverage
+**26 → 29/99** from a third of the notebooks; relaunch scheduled for 07:23 (the 17 missing shards
+resume; cached ones skip).
+
+**Change.** The sharded generator had no pause logic: after the limit hit it failed the remaining
+shards one by one against the same wall (harmless — nothing written — but wasteful, and noisy).
+`generate_tasks_sharded` now pauses after the first transient shard failure (the rest are
+`skipped:`), still merges what landed, and reports `paused`; the CLI prints the summary then raises
+`TransientLimitError` (exit 3). +1 test (199), order-independent (max_concurrency=1).
