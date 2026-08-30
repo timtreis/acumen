@@ -42,14 +42,13 @@ build plan + decisions: `tasks/build-plan.md`.
       today, so every single-draft number is a sample of one. Loop change in `_ensure_skill`/`_bench`
       + report. Then re-measure r2-v4 vs r2-v1 with N=3 on the lockbox to see what survives.
 
-- [ ] **Phase 3 — grow the corpus where it is gradeable** (`~/acumen-squidpy/run_phase3.sh`): the 50
-      tutorial notebooks through sharded task-gen → working set (lockbox untouched) → coverage. Then
-      targeted backfill from `coverage --queue` (`mine --query`, `tasks --feedback`), remaining 201
-      candidates. Goal: turn skill v1's 29 taught-but-unverified symbols into verified ones.
-- [ ] Re-bench `--no-skill` on new tasks; rerun the loop from the carried rulebook (v2) with more
-      headroom tasks per fold — 9–10 per fold cannot resolve a few-percent effect.
-- [ ] Lockbox context: bench `noskill` on the lockbox tasks once (36 runs) so the LOCKBOX line can
-      also show the skill-vs-no-skill floor; consider reporting the lockbox Δ on its hard subset.
+- [ ] Improve-step evidence: in both rounds the 2nd iteration regressed out of sample (over-fitting
+      residual train failures). Options: improve from fold-external failures only, cap edit size,
+      or require CV gain before carrying. Decide after N-draft scoring lands.
+- [ ] Targeted coverage backfill: `coverage --queue` → `tasks --feedback` naming the 21 taught-but-
+      unverified symbols (mostly `calculate_niche*`, loaders); remaining 201 mined candidates.
+- [ ] Report the lockbox Δ on its hard subset (14 tasks noskill fails) beside the full 36.
+- [x] Lockbox floor benched once: noskill 22/36.
 - [ ] Never run task-gen fleets and the loop concurrently (shared session window).
 
 ## Later / open
