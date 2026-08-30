@@ -100,3 +100,19 @@ def test_diff_lives_outside_the_version_dir_so_the_hash_holds(tmp_path: Path) ->
     (v2.directory / "from-v1.diff").write_text("x")
     with pytest.raises(RulebookError, match="modified since"):
         rb.load_rulebook(tmp_path, "v2")
+
+
+def test_normalize_frontmatter_quotes_a_colon_in_the_description() -> None:
+    from acumen.skills import normalize_frontmatter, parse_frontmatter
+
+    raw = "---\nname: squidpy\ndescription: Analyze spatial data (Visium: yes, Xenium: yes) — use when asked\n---\n\n# body\n"
+    fixed = normalize_frontmatter(raw)
+    front = parse_frontmatter(fixed)
+    assert front["name"] == "squidpy"
+    assert front["description"] == "Analyze spatial data (Visium: yes, Xenium: yes) — use when asked"
+    assert fixed.endswith("---\n\n# body\n")  # only the frontmatter block changed
+    # Valid frontmatter is returned byte-identical.
+    ok = '---\nname: x\ndescription: "already: quoted"\n---\nbody\n'
+    assert normalize_frontmatter(ok) == ok
+    # A file with no frontmatter is left alone (the validator reports it).
+    assert normalize_frontmatter("# no frontmatter\n") == "# no frontmatter\n"

@@ -961,3 +961,18 @@ failures into rules that break analyses it never saw. Iteration 2's rationale ag
 **Ops.** Four session-limit pauses in this round so far; the `retry` wrapper (12 × 30 min) covered
 three, but a 03:50 reset falls past its last attempt, so a manual relaunch is scheduled for 03:52.
 Consider making the wrapper parse the reset time instead of polling blindly.
+
+---
+
+## 2026-08-30 — Round 2 iteration 2 confirmed (−13%); a colon in a description killed a fold draft
+
+**Iteration 2 (r2-v2 → r2-v3):** CV **−13.3%** (spread 33%), Δ load +11%; within-task v2 18/45 →
+v3 12/45. Iteration 3, fold 1: **3/15 → 6/15 (+20%)** — then fold 2's *draft* failed: the agent wrote
+a `description:` with an unquoted colon, YAML rejected the frontmatter, `DraftError` (exit 2) ended
+the run. The content was fine; only quoting was missing — and the frontmatter is *our* format
+constraint. **Fix:** `skills.normalize_frontmatter` re-quotes unquoted top-level scalars when (and
+only when) the frontmatter fails to parse; `draft._validate_staged` applies it to the staged
+SKILL.md before validation. +1 test (200). Relaunched; the loop resumes at that draft.
+
+**Ops note.** `pgrep -f run_round2.sh` inside a monitor matches the monitor's own command line, so
+those monitors never see the exit; key liveness on the real `acumen loop --config` process.

@@ -201,6 +201,43 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
     return data
 
 
+def normalize_frontmatter(text: str) -> str:
+    """Quote frontmatter scalars YAML would misread, leaving valid frontmatter untouched.
+
+    A drafting agent writes ``description: Analyze data (Visium: yes) — use when …`` and YAML
+    rejects the second colon ("mapping values are not allowed here"). The content is fine; only the
+    quoting is missing, and the frontmatter is *our* format constraint, so repairing it is a
+    normalization rather than an edit of the agent's work: every unquoted top-level ``key: value``
+    line is rewritten with the value double-quoted (escaping ``\\`` and ``"``). Applied only when
+    the frontmatter fails to parse, and returns ``text`` unchanged if the repair does not parse
+    either — the validator then reports the real problem.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return text
+    body = match.group("body")
+    try:
+        yaml.safe_load(body)
+        return text
+    except yaml.YAMLError:
+        pass
+    fixed_lines = []
+    for line in body.splitlines():
+        key, sep, value = line.partition(":")
+        value = value.strip()
+        if sep and key and not key[0].isspace() and value and value[0] not in "\"'[{|>":
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            fixed_lines.append(f'{key}: "{escaped}"')
+        else:
+            fixed_lines.append(line)
+    fixed_body = "\n".join(fixed_lines)
+    try:
+        yaml.safe_load(fixed_body)
+    except yaml.YAMLError:
+        return text
+    return text[: match.start("body")] + fixed_body + text[match.end("body") :]
+
+
 def load_skill(skills_root: Path, version: str | int, *, expect_name: str | None = None) -> Skill:
     """Load and validate one skill version.
 

@@ -30,6 +30,7 @@ from acumen.skills import (
     SkillError,
     load_skill,
     next_version,
+    normalize_frontmatter,
     skill_dir,
     write_meta,
 )
@@ -57,6 +58,13 @@ def _validate_staged(staging: Path, skill_name: str) -> None:
         raise DraftError(
             f"the drafting agent did not write {SKILL_FILE} — nothing to promote. Inspect the run log or the prompt."
         )
+    # A description with an unquoted colon is the agent's content, not a defect: quote it so the
+    # frontmatter parses, rather than fail the run (which a fold draft did, mid-loop).
+    skill_md = staging / SKILL_FILE
+    text = skill_md.read_text()
+    normalized = normalize_frontmatter(text)
+    if normalized != text:
+        skill_md.write_text(normalized)
     # load_skill enforces the frontmatter contract (name matches, description present).
     try:
         load_skill(staging.parent, staging.name, expect_name=skill_name)
