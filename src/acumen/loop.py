@@ -45,7 +45,7 @@ from acumen import rulebooks as rb
 from acumen.bench import PlannedRun, build_matrix, pending, run_matrix
 from acumen.config import Config
 from acumen.difficulty import HeadroomSelection, screen, select_headroom
-from acumen.draft import draft_skill
+from acumen.draft import DraftError, draft_skill
 from acumen.env import AuthMode, Target, build_agent_env
 from acumen.folds import Fold, FoldError, Lockbox, check_disjoint, load_lockbox_tasks, make_folds, read_lockbox
 from acumen.improve import (
@@ -417,6 +417,14 @@ async def _ensure_skill(
             rulebook=rulebook_text,
             log=log,
         )
+    except DraftError as err:
+        # The platform refusing the drafting agent is a pause, not a failed draft: nothing was
+        # written, and the caller's rerun resumes here.
+        if is_transient(str(err)):
+            raise TransientLimitError(
+                f"the platform refused the drafting agent ({str(err)[:160]}); rerun to resume once the limit resets"
+            ) from err
+        raise
     finally:
         if log is not None:
             log.close()

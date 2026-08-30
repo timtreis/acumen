@@ -530,3 +530,22 @@ def test_run_iteration_resumes_without_respawning_agents(tmp_path: Path, monkeyp
     assert second.moved == first.moved == 1
     assert (second.baseline_version, second.improved_version) == ("v1", "v2")
     assert second.rulebook.changed  # reconstructed from the on-disk rulebook, not the baseline
+
+
+def test_draft_refused_by_the_platform_is_a_pause_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from acumen.draft import DraftError
+    from acumen.runner import TransientLimitError
+
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    _install_fakes(monkeypatch, cfg, {}, calls)
+
+    async def refused(**_):
+        raise DraftError("the drafting agent failed: ResultError: You've hit your session limit · resets 8:50am")
+
+    monkeypatch.setattr(loop_mod, "draft_skill", refused)
+    with pytest.raises(TransientLimitError, match="rerun to resume"):
+        _run(tmp_path, cfg, calls)
+    assert not (tmp_path / "skills" / "v1").exists()  # nothing written; resume starts at the draft
