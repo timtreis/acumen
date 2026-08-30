@@ -28,7 +28,19 @@ build plan + decisions: `tasks/build-plan.md`.
 - [x] Bugs found live and fixed: task-gen stall (sync guard), limit-as-failure (pause + raise),
       diff-inside-version-dir (hash tamper false positive).
 
+## Round 2 (2026-08-29/30) — done
+
+- [x] Phase 3: 50 notebooks → 83 tasks; working set 228; coverage 30/99; skill coverage 24 → 28 verified.
+- [x] Round 2 loop (fresh roots seeded from r1 pick): iter CVs +4.4% / −13.3% / +11.1%; pick **r2-v4**;
+      LOCKBOX r2-v1 22/36 → r2-v4 29/36 (+8/−1); vs round-1 best 27 → 29.
+- [x] **Finding: draft variance.** Same rulebook text, two drafts: 9/36 lockbox tasks differ (27 vs 22).
+- [x] Fixes found live: task-gen pause, 45-min Bash timeout (harness backgrounding), frontmatter
+      normalization, transient draft failures as pauses.
+
 ## Next
+- [ ] **Score a rulebook over N drafts** (mean ± spread; pick by mean). Draft variance ≈ effect size
+      today, so every single-draft number is a sample of one. Loop change in `_ensure_skill`/`_bench`
+      + report. Then re-measure r2-v4 vs r2-v1 with N=3 on the lockbox to see what survives.
 
 - [ ] **Phase 3 — grow the corpus where it is gradeable** (`~/acumen-squidpy/run_phase3.sh`): the 50
       tutorial notebooks through sharded task-gen → working set (lockbox untouched) → coverage. Then

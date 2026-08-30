@@ -976,3 +976,28 @@ SKILL.md before validation. +1 test (200). Relaunched; the loop resumes at that 
 
 **Ops note.** `pgrep -f run_round2.sh` inside a monitor matches the monitor's own command line, so
 those monitors never see the exit; key liveness on the real `acumen loop --config` process.
+
+---
+
+## 2026-08-30 — Round 2 verdict: pick r2-v4, lockbox 22 → 29/36 — and draft variance is the real finding
+
+**Round 2** (45 headroom tasks, k=3, seed = round 1's pick): iter 1 CV +4.4%, iter 2 **−13.3%**,
+iter 3 **+11.1%** (all three folds positive) → carried r2-v4 at 38% CV beats r2-v2's 33% → **pick r2-v4**
+(max iterations). **LOCKBOX: r2-v1 22/36 (61%) → r2-v4 29/36 (81%), +8 gained / −1 lost.**
+
+**But:** r2-v1 is a *fresh draft* of the same rulebook text as round 1's v2, which scored 27/36. Same
+text, two drafts, **9 of 36 lockbox tasks differ** (27 vs 22). Draft-to-draft variance is as large as
+the effects the loop measures. Honest statements: r2-v4 vs no skill **22 → 29 (+8/−1)**; r2-v4 vs
+round 1's best skill **27 → 29 (+3/−1)** — the best artifact so far, with the CV pick and the lockbox
+agreeing, but the "+19%" headline includes a draft that happened to land low. r2-v4 is 33.3 KB vs
+the 24.2 KB seed: this round bought passes with size.
+
+**What this changes.** The rulebook is scored through *one* draft. That makes every CV and lockbox
+number a sample of size one from a distribution whose spread we now know is ~±5/36. Next design
+lever: score a rulebook by the **mean over N drafts** (draft variance becomes a reported quantity, and
+the pick is by the mean), and read the size axis per draft. Second lever, unchanged: the improve
+step's second iteration regressed in both rounds — over-fitting residual failures — so evidence
+selection for the improve agent deserves work too.
+
+Ops: ~6 session-limit pauses across the round; all clean; the retry wrapper + one manual relaunch.
+Cost: roughly $300 subscription usage for round 2.
