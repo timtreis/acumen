@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from acumen import evolve as evolve_mod
 from acumen import loop as loop_mod
 from acumen import rulebooks as rb
 from acumen.config import Config
@@ -22,8 +23,13 @@ from acumen.env import Target
 from acumen.evolve import (
     DIRECTIVES,
     JOURNAL_FILE,
+    EvolveRun,
+    IslandResult,
     LoopError,
+    _champion_chain,
+    _write_island_materials,
     directive_for,
+    run_archipelago,
     run_evolve,
     screen_subset,
 )
@@ -289,3 +295,128 @@ def test_evolve_requires_a_lockbox_and_sane_parameters(tmp_path: Path, monkeypat
         with pytest.raises(LoopError):
             _evolve(tmp_path, cfg, tasks, allow_no_lockbox=True, **bad)
     assert calls == {"draft": 0, "bench": 0, "improve": 0}  # all refused before any agent ran
+
+
+# ── Islands and cross-pollination ───────────────────────────────────────────────────────
+
+
+def test_champion_chain_and_island_materials(tmp_path: Path) -> None:
+    """The chain holds only the edits that survived; the materials lay them out per island."""
+    root = tmp_path / "rulebooks"
+    assert rb.seed_default(root) == "v1"
+    base = rb.load_rulebook(root, "v1").text
+    rb.write_rulebook(root, "v2", base + "\n<!-- e1 -->\n", parent="v1", rationale="e1")
+    rb.write_rulebook(root, "v3", base + "\n<!-- e1 --><!-- e2 -->\n", parent="v2", rationale="e2")
+    rb.write_rulebook(root, "v4", base + "\n<!-- rejected -->\n", parent="v2", rationale="dead end")
+
+    assert _champion_chain(root, "v3") == [("v1", "v2"), ("v2", "v3")]
+    assert _champion_chain(root, "v1") == []
+
+    journal = tmp_path / "runs" / JOURNAL_FILE
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"generation": 1}\n')
+    island = IslandResult(
+        index=0,
+        task_ids=("a",),
+        run=EvolveRun(generations=[], champion="v3", stopped_because="test", journal_path=journal),
+        rulebooks_root=root,
+        skills_root=tmp_path / "skills",
+        runs_root=tmp_path / "runs",
+    )
+    dest = tmp_path / "materials"
+    _write_island_materials(dest, [island])
+    d = dest / "island-0"
+    assert (d / "champion.md").read_text() == rb.load_rulebook(root, "v3").text
+    assert (d / "journal.jsonl").read_text() == journal.read_text()
+    diffs = sorted(p.name for p in (d / "diffs").iterdir())
+    assert diffs == ["v1-to-v2.diff", "v2-to-v3.diff"]  # the rejected v4 is on nobody's chain
+    assert "<!-- e1 -->" in (d / "diffs" / "v1-to-v2.diff").read_text()
+
+
+def test_archipelago_evolves_islands_pollinates_validates_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    improves: list[dict] = []
+    ids = [f"t{i}" for i in range(6)]
+    passes = {"v1": set(), "v2": set(ids) | {"z1", "z2"}}
+    _install_fakes(monkeypatch, cfg, calls, improves, passes)
+    tasks = [_task(t) for t in ids]
+    lockbox = write_lockbox(tmp_path / "lockbox", [_task("z1"), _task("z2")], seed=0, fraction=0.3, dump=dump_tasks)
+
+    polls: list[dict] = []
+
+    async def fake_pollinate(*, cfg, target, rulebooks_root, islands, parent_version="v1", deny_dirs=(), **_):
+        polls.append(
+            {
+                "islands": [(i.index, i.run.champion, i.task_ids) for i in islands],
+                "deny": [Path(d) for d in deny_dirs],
+            }
+        )
+        text = rb.load_rulebook(rulebooks_root, parent_version).text + "\n<!-- merged -->\n"
+        rb.write_rulebook(rulebooks_root, "v2", text, parent=parent_version, rationale="meta-rule: replicated")
+        return RulebookResult(
+            version="v2",
+            parent=parent_version,
+            path=rb.rulebook_dir(rulebooks_root, "v2") / rb.RULEBOOK_FILE,
+            rationale="meta-rule: replicated",
+            changed=True,
+            cost_usd=0.3,
+            turns=1,
+            n_train_runs=0,
+            n_train_failures=0,
+        )
+
+    monkeypatch.setattr(evolve_mod, "pollinate", fake_pollinate)
+    kw = {
+        "cfg": cfg,
+        "target": _target(tmp_path),
+        "skills_root": tmp_path / "skills",
+        "rulebooks_root": tmp_path / "rulebooks",
+        "runs_root": tmp_path / "runs",
+        "tasks": tasks,
+        "k": 2,
+        "generations": 1,
+        "screen_size": 3,
+        "accept_delta": 2,
+        "confirm_every": 1,
+        "n_drafts": 1,
+        "lockbox_dir": lockbox.directory,
+        "auth_mode": "session",
+    }
+
+    run = asyncio.run(run_archipelago(**kw))
+
+    # Partitions: disjoint, covering, one per island; each island evolved in its own trees.
+    pools = [set(isl.task_ids) for isl in run.islands]
+    assert pools[0] & pools[1] == set() and pools[0] | pools[1] == set(ids)
+    for isl in run.islands:
+        assert isl.run.champion == "v2" and isl.run.lockbox_drafts is None  # islands never open the lockbox
+        assert evolve_mod.island_root(tmp_path / "rulebooks", isl.index).is_dir()
+        assert (isl.runs_root / JOURNAL_FILE).is_file()
+    # Every island improve agent was denied the ENTIRE main run tree (and thus every sibling).
+    assert improves and all(any(d == tmp_path / "runs" for d in c["deny"]) for c in improves)
+
+    # Pollination saw both champions; the merged version landed on the main chain.
+    assert len(polls) == 1
+    assert [(i, champ) for i, champ, _ in polls[0]["islands"]] == [(1, "v2"), (2, "v2")]  # fold indices are 1-based
+    assert run.merged.version == "v2" and rb.available_versions(tmp_path / "rulebooks") == ["v1", "v2"]
+
+    # Cross-island validation on the FULL working set, and the lockbox verdict.
+    assert (run.seed_test.passed, run.seed_test.total) == (0, 6)
+    assert (run.merged_test.passed, run.merged_test.total) == (6, 6)
+    assert run.lockbox_baseline_drafts is not None and run.lockbox_baseline_drafts.scores[0].passed == 0
+    assert run.lockbox_drafts is not None and run.lockbox_drafts.scores[0].passed == 2
+    assert run.lockbox_mean_delta == 1.0
+
+    # Resume: islands, pollination, benches all replay from disk — zero agents.
+    calls.update(draft=0, bench=0, improve=0)
+    polls.clear()
+    again = asyncio.run(run_archipelago(**kw))
+    assert calls == {"draft": 0, "bench": 0, "improve": 0} and polls == []
+    assert again.merged.version == "v2" and again.merged.rationale == "meta-rule: replicated"
+    assert again.lockbox_mean_delta == 1.0
+
+    with pytest.raises(LoopError, match="k >= 2"):
+        asyncio.run(run_archipelago(**{**kw, "k": 1}))

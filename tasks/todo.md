@@ -54,11 +54,14 @@ build plan + decisions: `tasks/build-plan.md`.
       directives, cheap rotating 12-task screens (accept ≥ +2), full-bench ratchet every 5 accepts
       with revert, `runs/evolve.jsonl` decision archive, deterministic resume, lockbox once at end
       over `--drafts` (default 3). `src/acumen/evolve.py` + CLI + 6 tests. Not yet run live.
-- [ ] **Islands + cross-pollination** (designed, not built): k independent `evolve` runs on disjoint
-      task partitions (`evaluate_lockbox=False`), then a meta-agent mines the journals/diffs for
-      edits replicating across ≥2 islands → meta-rules → merged rulebook; validate cross-island;
-      only the merged champion opens the lockbox. Calibrate `--accept-delta` from the variance
-      experiment before the first live evolve run.
+- [x] **Islands + cross-pollination** (2026-08-31): `evolve --islands K` — k independent evolutions
+      on disjoint `make_folds` partitions (own trees, main run tree denied, lockbox never opened),
+      then the `pollinate` meta-agent merges edits that replicated across ≥2 islands into meta-rules
+      (rationale = the meta-rule list; surviving-edit diffs via `_champion_chain`); validation =
+      full working test split, then lockbox over `--drafts`. 212 tests. Not yet run live.
+- [ ] **First live evolve run** (after the variance experiment reports): calibrate `--accept-delta`
+      from the measured draft spread, then `acumen evolve --islands 3 --generations 10 --headroom`
+      in a fresh workspace root. One fleet/loop/evolve at a time (shared session window).
 - [ ] Targeted coverage backfill: `coverage --queue` → `tasks --feedback` naming the 21 taught-but-
       unverified symbols (mostly `calculate_niche*`, loaders); remaining 201 mined candidates.
 - [ ] Report the lockbox Δ on its hard subset (14 tasks noskill fails) beside the full 36.

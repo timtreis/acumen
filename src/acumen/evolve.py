@@ -29,24 +29,32 @@ decision from on-disk scores without spawning an agent for finished work.
 
 from __future__ import annotations
 
+import difflib
 import json
 import random
+import shutil
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
 from acumen import rulebooks as rb
 from acumen.bench import PlannedRun
 from acumen.config import Config
 from acumen.difficulty import HeadroomSelection, screen, select_headroom
-from acumen.env import AuthMode, Target
-from acumen.folds import FoldError, Lockbox, check_disjoint, load_lockbox_tasks, read_lockbox
+from acumen.env import AuthMode, Target, build_agent_env
+from acumen.folds import FoldError, Lockbox, check_disjoint, load_lockbox_tasks, make_folds, read_lockbox
+from acumen.improve import _read_rationale, make_test_guard
+from acumen.logs import LiveLog
 from acumen.loop import (
     DRAFTS_DIRNAME,
     LOCKBOX_RUNS_DIRNAME,
     DraftScores,
     LoopError,
+    RulebookResult,
     Score,
     _bench,
     _ensure_rulebook,
@@ -55,7 +63,9 @@ from acumen.loop import (
     score,
 )
 from acumen.paths import SPLITS
-from acumen.runner import RunOutcome
+from acumen.procs import label_env, reap
+from acumen.prompts import pollinate_prompt
+from acumen.runner import RunOutcome, TransientLimitError, is_transient
 from acumen.skills import Skill
 from acumen.tasks import Task
 
@@ -214,6 +224,7 @@ async def run_evolve(
     stream: bool = False,
     headroom_only: bool = False,
     max_wallclock_s: float | None = None,
+    extra_deny_dirs: Sequence[Path] = (),
     clock: Callable[[], float] = time.monotonic,
     on_select: Callable[[HeadroomSelection], None] | None = None,
     on_generation: Callable[[Generation], None] | None = None,
@@ -291,7 +302,7 @@ async def run_evolve(
 
     by_id = {t.id: t for t in tasks}
     pool_ids = sorted(by_id)
-    deny_dirs: list[Path] = [runs_root / LOCKBOX_RUNS_DIRNAME, runs_root / DRAFTS_DIRNAME]
+    deny_dirs: list[Path] = [runs_root / LOCKBOX_RUNS_DIRNAME, runs_root / DRAFTS_DIRNAME, *extra_deny_dirs]
     if lockbox is not None:
         deny_dirs.append(lockbox.directory)
 
@@ -453,6 +464,478 @@ async def run_evolve(
         champion=confirmed,
         stopped_because=reason,
         journal_path=journal_path,
+        lockbox_drafts=lockbox_drafts,
+        lockbox_baseline_drafts=baseline_drafts,
+        selection=selection,
+        cost_usd=total_cost,
+    )
+
+
+# ── Islands and cross-pollination ───────────────────────────────────────────────────────
+
+#: Subdirectory (under skills/, rulebooks/, and runs/) holding each island's independent trees.
+ISLANDS_DIRNAME = "islands"
+
+
+def island_root(root: Path, index: int) -> Path:
+    """Where island ``index`` lives under a skills, rulebooks, or runs root."""
+    return root / ISLANDS_DIRNAME / f"island-{index}"
+
+
+@dataclass(frozen=True)
+class IslandResult:
+    """One island's finished evolution: its task pool, its champion, and where its trees live."""
+
+    index: int
+    task_ids: tuple[str, ...]
+    run: EvolveRun
+    rulebooks_root: Path
+    skills_root: Path
+    runs_root: Path
+
+
+@dataclass(frozen=True)
+class ArchipelagoRun:
+    """k independent evolutions, one cross-pollinated merge, and the merge's honest scores."""
+
+    islands: list[IslandResult]
+    #: The merged rulebook — its rationale is the meta-rule list with supporting islands.
+    merged: RulebookResult
+    #: The seed's and the merged version's skills on the FULL working test split (cross-island
+    #: validation: every island's surviving edits, scored on every other island's tasks too).
+    seed_test: Score
+    merged_test: Score
+    lockbox_drafts: DraftScores | None = None
+    lockbox_baseline_drafts: DraftScores | None = None
+    selection: HeadroomSelection | None = None
+    cost_usd: float = 0.0
+
+    @property
+    def lockbox_mean_delta(self) -> float | None:
+        """Lockbox mean-rate change from the seed to the merged champion, over all drafts."""
+        if self.lockbox_drafts is None or self.lockbox_baseline_drafts is None:
+            return None
+        return self.lockbox_drafts.mean_rate - self.lockbox_baseline_drafts.mean_rate
+
+
+def _champion_chain(rulebooks_root: Path, champion: str) -> list[tuple[str, str]]:
+    """The ``(parent, version)`` edges from the seed to the champion, oldest first.
+
+    Exactly the edits that survived screens and confirmations — rejected candidates keep their
+    version directories but are on nobody's parent chain.
+    """
+    chain: list[tuple[str, str]] = []
+    cur = champion
+    seen = {cur}
+    while cur != "v1":
+        meta = rb.rulebook_meta(rulebooks_root, cur)
+        parent = meta.parent if meta is not None and meta.parent else "v1"
+        if parent not in rb.available_versions(rulebooks_root) or parent in seen:
+            break  # the chain left this root (an island seed's parent is a main-tree label)
+        chain.append((parent, cur))
+        seen.add(parent)
+        cur = parent
+    return list(reversed(chain))
+
+
+def _write_island_materials(dest: Path, islands: Sequence[IslandResult]) -> None:
+    """Lay out what the pollination agent reads: per island, champion + journal + surviving diffs."""
+    for island in islands:
+        d = dest / f"island-{island.index}"
+        (d / "diffs").mkdir(parents=True, exist_ok=True)
+        (d / "champion.md").write_text(rb.load_rulebook(island.rulebooks_root, island.run.champion).text)
+        journal = island.run.journal_path
+        (d / "journal.jsonl").write_text(journal.read_text() if journal.is_file() else "")
+        for parent, version in _champion_chain(island.rulebooks_root, island.run.champion):
+            diff = "".join(
+                difflib.unified_diff(
+                    rb.load_rulebook(island.rulebooks_root, parent).text.splitlines(keepends=True),
+                    rb.load_rulebook(island.rulebooks_root, version).text.splitlines(keepends=True),
+                    fromfile=f"island-{island.index} {parent}",
+                    tofile=f"island-{island.index} {version}",
+                )
+            )
+            (d / "diffs" / f"{parent}-to-{version}.diff").write_text(diff)
+
+
+async def pollinate(
+    *,
+    cfg: Config,
+    target: Target,
+    rulebooks_root: Path,
+    islands: Sequence[IslandResult],
+    auth_mode: AuthMode = "session",
+    parent_version: str = "v1",
+    model: str | None = None,
+    max_turns: int | None = None,
+    max_usd: float | None = None,
+    feedback: str | None = None,
+    log: LiveLog | None = None,
+    deny_dirs: Sequence[Path] = (),
+) -> RulebookResult:
+    """Merge the islands' champions into the next main-chain rulebook version via a meta-agent.
+
+    The agent gets, per island: the champion rulebook, the full decision journal, and one unified
+    diff per surviving edit (:func:`_champion_chain`). Its brief (:func:`acumen.prompts.pollinate_prompt`)
+    is to keep only guidance that REPLICATED across islands — the structural reading of "always
+    seems to improve" — and its rationale is the meta-rule list with supporting islands, recorded
+    in the merged version's ``meta.json``. The same test guard as every improve agent applies, with
+    ``deny_dirs`` covering every run tree and the lockbox.
+
+    Raises
+    ------
+    LoopError
+        If the merged version already exists (resume at the caller decides that), or the agent
+        produced an invalid rulebook.
+    """
+    parent_text = rb.load_rulebook(rulebooks_root, parent_version).text
+    new_version = rb.next_version(rulebooks_root)
+    if rb.rulebook_dir(rulebooks_root, new_version).exists():
+        raise LoopError(f"rulebook {new_version} already exists — versions are immutable")
+
+    holder = Path(tempfile.mkdtemp(prefix="acumen-pollinate-"))
+    try:
+        work = holder / "work"
+        staged = work / rb.RULEBOOK_FILE
+        islands_dir = work / "islands"
+        rationale_path = work / "rationale.md"
+        home = holder / "home"
+        config_dir = home / ".claude"
+        for path in (work, islands_dir, home, config_dir, home / "tmp"):
+            path.mkdir(parents=True, exist_ok=True)
+        staged.write_text(parent_text)
+        _write_island_materials(islands_dir, islands)
+
+        env = label_env(
+            build_agent_env(
+                config_dir=config_dir,
+                home=home,
+                extra_path=[target.bin_dir],
+                auth_mode=auth_mode,
+                extra_allow=cfg.env_passthrough,
+            ),
+            holder,
+        )
+        prompt = pollinate_prompt(
+            package=target.pkg_name,
+            k=len(islands),
+            rulebook_path=staged,
+            islands_dir=islands_dir,
+            rationale_path=rationale_path,
+            parent_version=parent_version,
+            new_version=new_version,
+            feedback=feedback,
+        )
+        options = ClaudeAgentOptions(
+            cwd=str(work),
+            env=env,
+            model=model or cfg.improve_model,
+            max_turns=max_turns,
+            max_budget_usd=max_usd,
+            setting_sources=["project"],
+            permission_mode="bypassPermissions",
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            hooks={"PreToolUse": [make_test_guard(rulebooks_root.parent, held_out_ids=(), deny_dirs=deny_dirs)]},
+        )
+
+        result: ResultMessage | None = None
+        agent_error: Exception | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if log is not None:
+                    log.append(message)
+                if isinstance(message, ResultMessage):
+                    result = message
+        except Exception as err:  # noqa: BLE001 - a failed pollination is an error to report, re-raised below
+            agent_error = err
+        finally:
+            if log is not None:
+                log.finalize(config_dir=config_dir, work_dir=work, result=result)
+
+        if agent_error is not None:
+            if is_transient(str(agent_error)):
+                raise TransientLimitError(
+                    f"the platform refused the pollination agent ({str(agent_error)[:160]}); nothing was "
+                    "written — rerun to resume once the limit resets"
+                ) from agent_error
+            raise LoopError(f"the pollination agent failed: {type(agent_error).__name__}: {agent_error}") from (
+                agent_error
+            )
+        if result is None:
+            raise LoopError("the pollination agent produced no result message")
+        if result.is_error:
+            detail = f"{result.subtype} {' '.join(map(str, result.errors or []))}".strip()
+            if is_transient(detail):
+                raise TransientLimitError(
+                    f"the platform refused the pollination agent ({detail[:160]}); nothing was written — "
+                    "rerun to resume once the limit resets"
+                )
+            raise LoopError(f"the pollination agent errored: {detail}")
+
+        new_text = staged.read_text()
+        rationale = _read_rationale(rationale_path, result, parent_version, new_version)
+        try:
+            written = rb.write_rulebook(
+                rulebooks_root, new_version, new_text, parent=parent_version, rationale=rationale, feedback=feedback
+            )
+        except rb.RulebookError as err:
+            raise LoopError(f"the pollination agent produced an invalid rulebook: {err}") from err
+
+        return RulebookResult(
+            version=new_version,
+            parent=parent_version,
+            path=written.path,
+            rationale=rationale,
+            changed=new_text != parent_text,
+            cost_usd=result.total_cost_usd or 0.0,
+            turns=result.num_turns,
+            n_train_runs=0,
+            n_train_failures=0,
+            log_jsonl=log.jsonl_path if log is not None else None,
+            log_html=log.html_path if log is not None and log.html_rendered else None,
+        )
+    finally:
+        reap(holder)
+        shutil.rmtree(holder, ignore_errors=True)
+
+
+async def run_archipelago(
+    *,
+    cfg: Config,
+    target: Target,
+    skills_root: Path,
+    rulebooks_root: Path,
+    runs_root: Path,
+    tasks: Sequence[Task],
+    k: int = 3,
+    generations: int = 10,
+    screen_size: int = 12,
+    epoch_len: int = 5,
+    accept_delta: int = 2,
+    confirm_every: int = 5,
+    n_drafts: int = 3,
+    seed: int = 0,
+    lockbox_dir: Path | None = None,
+    allow_no_lockbox: bool = False,
+    auth_mode: AuthMode = "session",
+    max_concurrency: int | None = None,
+    feedback: str | None = None,
+    log_dir: Path | None = None,
+    stream: bool = False,
+    headroom_only: bool = False,
+    max_wallclock_s: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    on_select: Callable[[HeadroomSelection], None] | None = None,
+    on_island: Callable[[IslandResult], None] | None = None,
+    on_generation: Callable[[Generation], None] | None = None,
+    on_bench_start: Callable[[PlannedRun], None] | None = None,
+    on_bench_done: Callable[[RunOutcome], None] | None = None,
+) -> ArchipelagoRun:
+    """Evolve ``k`` islands on disjoint task partitions, cross-pollinate, validate, open the lockbox.
+
+    Each island runs :func:`run_evolve` for ``generations`` generations on its own partition
+    (:func:`acumen.folds.make_folds` held-out sets — disjoint, covering), in its own rulebook/skill/
+    run trees, with every other island's runs and the whole main run tree denied to its agents —
+    the islands' learnings are independent by construction, which is what makes replication across
+    them evidence. Islands never open the lockbox.
+
+    Then :func:`pollinate` merges the champions into the next main-chain version (skipped on resume
+    when it already exists), the merged skill and the seed skill are benched on the FULL working
+    test split — an edit that won on island A is thereby validated on islands B and C's tasks —
+    and finally both are scored on the lockbox over ``n_drafts`` drafts each.
+
+    Sequential on purpose: islands share one subscription session window; parallel islands would
+    just trade pauses.
+    """
+    if k < 2:
+        raise LoopError(f"an archipelago needs k >= 2 islands (replication is the point), got {k}")
+    started = clock()
+    total_cost = 0.0
+
+    lockbox: Lockbox | None = None
+    if lockbox_dir is not None:
+        try:
+            lockbox = read_lockbox(lockbox_dir)
+            check_disjoint(tasks, lockbox)
+        except FoldError as err:
+            raise LoopError(str(err)) from err
+    elif not allow_no_lockbox:
+        raise LoopError("no lockbox given — pass --lockbox (or --no-lockbox to waive the final held-out verdict)")
+
+    selection: HeadroomSelection | None = None
+    if headroom_only:
+        diffs = screen(runs_root, tasks, by_model=True)
+        selection = select_headroom(diffs, tasks, split="test", models=cfg.models)
+        if on_select is not None:
+            on_select(selection)
+        if not selection.selected:
+            raise LoopError("no task has headroom to evolve on — run `acumen bench --no-skill` on more tasks first")
+        tasks = selection.selected
+
+    by_id = {t.id: t for t in tasks}
+    try:
+        folds = make_folds(sorted(by_id), k, seed)
+    except FoldError as err:
+        raise LoopError(str(err)) from err
+
+    seed_version = rb.seed_default(rulebooks_root)
+    if seed_version != "v1":
+        raise LoopError(f"expected the main rulebook chain to start at v1, found {seed_version}")
+    seed_text = rb.load_rulebook(rulebooks_root, "v1").text
+
+    islands: list[IslandResult] = []
+    for fold in folds:
+        i = fold.index
+        pool = tuple(fold.held_out)  # held-out sets are disjoint and cover the working set
+        rb_root = island_root(rulebooks_root, i)
+        sk_root = island_root(skills_root, i)
+        rn_root = island_root(runs_root, i)
+        if "v1" not in rb.available_versions(rb_root):
+            rb.write_rulebook(
+                rb_root,
+                "v1",
+                seed_text,
+                parent=f"seed:{seed_version}",
+                rationale=f"island {i} seed — a copy of the main rulebook {seed_version}, "
+                f"evolving independently on {len(pool)} task(s)",
+            )
+        remaining = None
+        if max_wallclock_s is not None:
+            remaining = max(0.0, max_wallclock_s - (clock() - started))
+        run = await run_evolve(
+            cfg=cfg,
+            target=target,
+            skills_root=sk_root,
+            rulebooks_root=rb_root,
+            runs_root=rn_root,
+            tasks=[by_id[t] for t in pool],
+            generations=generations,
+            screen_size=screen_size,
+            epoch_len=epoch_len,
+            accept_delta=accept_delta,
+            confirm_every=confirm_every,
+            n_drafts=1,
+            seed=seed,
+            lockbox_dir=lockbox_dir,
+            allow_no_lockbox=allow_no_lockbox,
+            evaluate_lockbox=False,
+            auth_mode=auth_mode,
+            max_concurrency=max_concurrency,
+            feedback=feedback,
+            log_dir=(log_dir / f"island-{i}") if log_dir is not None else None,
+            stream=stream,
+            headroom_only=False,
+            max_wallclock_s=remaining,
+            extra_deny_dirs=[runs_root],  # denies the main tree AND every sibling island's runs
+            clock=clock,
+            on_generation=on_generation,
+            on_bench_start=on_bench_start,
+            on_bench_done=on_bench_done,
+        )
+        total_cost += run.cost_usd
+        result = IslandResult(
+            index=i, task_ids=pool, run=run, rulebooks_root=rb_root, skills_root=sk_root, runs_root=rn_root
+        )
+        islands.append(result)
+        if on_island is not None:
+            on_island(result)
+
+    # Cross-pollination into the main chain (resumed from disk if the merged version exists).
+    merged_version = "v2"
+    deny: list[Path] = [runs_root]
+    if lockbox is not None:
+        deny.append(lockbox.directory)
+    if merged_version in rb.available_versions(rulebooks_root):
+        resumed = rb.load_rulebook(rulebooks_root, merged_version)
+        meta = rb.rulebook_meta(rulebooks_root, merged_version)
+        merged = RulebookResult(
+            version=merged_version,
+            parent=meta.parent if meta is not None and meta.parent else "v1",
+            path=resumed.path,
+            rationale=(meta.rationale if meta is not None and meta.rationale else "(resumed; rationale not recorded)"),
+            changed=resumed.text != seed_text,
+            cost_usd=0.0,
+            turns=0,
+            n_train_runs=0,
+            n_train_failures=0,
+        )
+    else:
+        log = LiveLog.open(log_dir, "pollinate-v2", stream=stream) if log_dir is not None else None
+        try:
+            merged = await pollinate(
+                cfg=cfg,
+                target=target,
+                rulebooks_root=rulebooks_root,
+                islands=islands,
+                auth_mode=auth_mode,
+                parent_version="v1",
+                feedback=feedback,
+                log=log,
+                deny_dirs=deny,
+            )
+        finally:
+            if log is not None:
+                log.close()
+        total_cost += merged.cost_usd
+
+    # Cross-island validation: seed and merged skills on the FULL working test split.
+    async def full_test(version: str) -> Score:
+        skill, cost = await _ensure_skill(
+            cfg=cfg,
+            target=target,
+            skills_root=skills_root,
+            rulebook_text=rb.load_rulebook(rulebooks_root, version).text,
+            expect_version=version,
+            auth_mode=auth_mode,
+            rationale=f"drafted from rulebook {version}",
+            log_dir=log_dir,
+            stream=stream,
+        )
+        nonlocal total_cost
+        total_cost += cost
+        planned = await _bench(
+            cfg=cfg,
+            target=target,
+            skill=skill,
+            tasks=tasks,
+            runs_root=runs_root,
+            splits=["test"],
+            auth_mode=auth_mode,
+            task_ids=None,
+            max_concurrency=max_concurrency or cfg.max_concurrency,
+            on_start=on_bench_start,
+            on_done=on_bench_done,
+        )
+        return score(runs_root, planned)
+
+    seed_test = await full_test("v1")
+    merged_test = await full_test(merged_version)
+
+    lockbox_drafts = baseline_drafts = None
+    if lockbox is not None:
+        common = {
+            "cfg": cfg,
+            "target": target,
+            "skills_root": skills_root,
+            "rulebooks_root": rulebooks_root,
+            "runs_root": runs_root,
+            "n_drafts": n_drafts,
+            "tasks": load_lockbox_tasks(lockbox),
+            "auth_mode": auth_mode,
+            "max_concurrency": max_concurrency or cfg.max_concurrency,
+            "log_dir": log_dir,
+            "stream": stream,
+            "on_bench_start": on_bench_start,
+            "on_bench_done": on_bench_done,
+        }
+        baseline_drafts = await _lockbox_eval(version="v1", **common)
+        lockbox_drafts = await _lockbox_eval(version=merged_version, **common)
+
+    return ArchipelagoRun(
+        islands=islands,
+        merged=merged,
+        seed_test=seed_test,
+        merged_test=merged_test,
         lockbox_drafts=lockbox_drafts,
         lockbox_baseline_drafts=baseline_drafts,
         selection=selection,

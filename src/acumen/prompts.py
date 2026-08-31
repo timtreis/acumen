@@ -345,6 +345,57 @@ When you are done, `{rulebook_path}` still fills cleanly with the placeholders a
 `{rationale_path}` holds your rationale.
 """
 
+POLLINATE_PROMPT = """\
+You are CROSS-POLLINATING {k} independently evolved RULEBOOKS for the Python package `{package}`.
+A rulebook is the reusable instructions a drafting agent follows to write a Claude Skill
+(`SKILL.md`); you are NOT writing a skill. Each island started from the SAME seed rulebook and
+evolved it over many generations on a DISJOINT set of analysis tasks — so an edit that helped on
+two islands was validated twice, on unrelated tasks, independently. Your job is to distill the
+edits that replicate into META-RULES and merge them into one rulebook.
+
+You are producing rulebook version {new_version} — a merge grounded in {parent_version}.
+
+# What you can read
+
+- `{rulebook_path}` — the seed/parent rulebook ({parent_version}). A copy you EDIT IN PLACE; what
+  it contains when you finish becomes {new_version}.
+- `{islands_dir}/island-<i>/champion.md` — island i's final champion rulebook (the survivor of its
+  screens and full-bench confirmations).
+- `{islands_dir}/island-<i>/journal.jsonl` — every generation's decision on island i: the
+  exploration directive, the screen scores, whether the edit was accepted, and whether a full
+  bench confirmed or reverted it.
+- `{islands_dir}/island-<i>/diffs/` — one unified diff per generation that reached the island's
+  champion chain: exactly the edits that survived.
+
+# What you must derive: meta-rules
+
+A piece of guidance is a META-RULE only if it REPLICATES: the same kind of change was accepted on
+two or more islands independently (compare the diffs and champions — the wording may differ, the
+principle must match). Treat guidance found on a single island as island noise: keep it only if it
+is clearly a special case of a replicated principle. Rejected and reverted edits are evidence too —
+guidance that repeatedly FAILED screens or was reverted on a full bench should not survive the
+merge, even if one champion still carries it.
+
+# How to merge
+
+- Start from the parent at `{rulebook_path}` and fold each meta-rule in ONCE, in the clearest
+  wording any island found — do not concatenate the champions.
+- Same rules as any rulebook edit: fix methodology, never an instance; NEVER put a task-specific
+  fact (dataset, parameter value, expected answer) into the rulebook; keep it lean — every
+  instruction is paid on every future draft; preserve every `{{...}}` placeholder EXACTLY
+  (`{{package}}`, `{{src}}`, `{{python}}`, `{{out}}`, `{{skill_name}}`, `{{version}}`,
+  `{{feedback}}`).
+
+# What you must write
+
+1. Edit `{rulebook_path}` in place — it must remain a valid draft-prompt template.
+2. `{rationale_path}` — the meta-rule list: one line per meta-rule, naming WHICH islands support
+   it and what evidence (accepted diffs, journal entries). Write it OUTSIDE the rulebook file.
+{feedback}
+When you are done, `{rulebook_path}` still fills cleanly with the placeholders above, and
+`{rationale_path}` enumerates the meta-rules with their supporting islands.
+"""
+
 
 TASKGEN_PROMPT = """\
 You are writing a benchmark of real analysis tasks for a Python package (`{package}`). Each
@@ -1011,6 +1062,57 @@ def rulebook_improve_prompt(
         package=package,
         rulebook_path=rulebook_path,
         train_dir=train_dir,
+        rationale_path=rationale_path,
+        parent_version=parent_version,
+        new_version=new_version,
+        feedback=feedback_block(feedback),
+    )
+
+
+def pollinate_prompt(
+    *,
+    package: str,
+    k: int,
+    rulebook_path: Path,
+    islands_dir: Path,
+    rationale_path: Path,
+    parent_version: str,
+    new_version: str,
+    feedback: str | None = None,
+) -> str:
+    """Build the prompt for the cross-pollination agent that merges island champions.
+
+    The agent reads each island's champion rulebook, decision journal, and accepted-edit diffs,
+    distills the edits that replicated across independent islands into meta-rules, and merges them
+    into the parent rulebook. Replication across disjoint task partitions is the evidence standard:
+    it is the structural version of "this edit ALWAYS seems to improve".
+
+    Parameters
+    ----------
+    package
+        The target package name, for orientation.
+    k
+        How many islands evolved independently.
+    rulebook_path
+        The staged parent-rulebook copy the agent edits in place to produce the merged version.
+    islands_dir
+        Directory holding one ``island-<i>/`` of materials per island (champion, journal, diffs).
+    rationale_path
+        Where the agent writes the meta-rule list — outside the rulebook file.
+    parent_version, new_version
+        The parent rulebook version and the merged one being produced.
+    feedback
+        Optional maintainer guidance, subordinated below the hard rules.
+
+    Returns
+    -------
+    The cross-pollination prompt.
+    """
+    return POLLINATE_PROMPT.format(
+        package=package,
+        k=k,
+        rulebook_path=rulebook_path,
+        islands_dir=islands_dir,
         rationale_path=rationale_path,
         parent_version=parent_version,
         new_version=new_version,

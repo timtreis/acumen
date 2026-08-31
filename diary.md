@@ -1055,3 +1055,29 @@ B's tasks. Only the merged champion opens the lockbox.
 210 tests (was 204): directive/subset determinism, improve-from-best after reject AND after a
 reverted confirmation, ratchet promote/revert, journal idempotence, agent-free resume, parameter
 validation, lockbox denial. Not yet run live (variance experiment occupies the session window).
+
+## 2026-08-31 — Islands + cross-pollination (`evolve --islands K`)
+
+The user's design: run evolution independently on disjoint CV-style task partitions, then
+cross-pollinate — derive "meta-rules" that ALWAYS seem to improve. The structural reading:
+replication across independent islands IS the evidence standard.
+
+- `run_archipelago`: k islands = `make_folds` held-out sets (disjoint, covering); each runs
+  `run_evolve` in its own `{rulebooks,skills,runs}/islands/island-i/` trees with the ENTIRE main
+  run tree denied to its agents (covers every sibling island too) and `evaluate_lockbox=False` —
+  islands never open the lockbox. Sequential (shared session window).
+- `pollinate`: a meta-agent gets, per island, the champion rulebook, the full decision journal,
+  and one unified diff per SURVIVING edit (`_champion_chain` — rejected candidates are on nobody's
+  parent chain). Its brief (POLLINATE_PROMPT): only guidance that replicated across ≥2 islands
+  survives the merge; repeatedly-reverted guidance dies even if one champion carries it; rationale
+  = the meta-rule list with supporting islands, recorded in the merged version's meta.json.
+- Validation ladder: merged + seed benched on the FULL working test split (an edit that won on
+  island A is scored on islands B/C's tasks) → then the lockbox once, over `--drafts` per version.
+- Resume everywhere: islands by their own file trees, pollination skipped when the merged version
+  exists, benches by run presence.
+
+212 tests (was 210 mid-day): champion-chain/materials, full archipelago with fakes (partition
+disjointness, island isolation via deny_dirs, pollination inputs, cross-island validation, lockbox,
+zero-agent resume, k>=2). Not yet run live. First live shot after the variance experiment reports:
+`acumen evolve --islands 3 --generations 10 --headroom ...` with `--accept-delta` calibrated from
+the measured draft spread.

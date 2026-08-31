@@ -15,7 +15,7 @@ from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, meas
 from acumen.difficulty import HeadroomSelection, screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
-from acumen.evolve import Generation, run_evolve
+from acumen.evolve import Generation, IslandResult, run_archipelago, run_evolve
 from acumen.folds import FoldError, split_lockbox, write_lockbox
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
@@ -763,6 +763,74 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
             flush=True,
         )
 
+    def print_drafts(baseline, drafts) -> None:
+        shown = {ds.version: ds for ds in (baseline, drafts)}
+        for ds in shown.values():
+            per = "  ".join(
+                f"d{i} {s.passed}/{s.total} ({size / 1024:.1f}KB)"
+                for i, (s, size) in enumerate(zip(ds.scores, ds.sizes, strict=True), start=1)
+            )
+            print(f"  lockbox drafts of {ds.version}: {per}   mean {ds.mean_rate:.0%}, spread {ds.spread:.0%}")
+
+    if args.islands:
+
+        def on_island(isl: IslandResult) -> None:
+            print(
+                f"\n--- island {isl.index} done: champion {isl.run.champion} "
+                f"({isl.run.accepted}/{len(isl.run.generations)} generation(s) accepted, "
+                f"{len(isl.task_ids)} task(s)) ---",
+                flush=True,
+            )
+
+        run = asyncio.run(
+            run_archipelago(
+                cfg=cfg,
+                target=target,
+                skills_root=args.skills,
+                rulebooks_root=args.rulebooks,
+                runs_root=args.runs,
+                tasks=tasks,
+                k=args.islands,
+                generations=args.generations,
+                screen_size=args.screen_size,
+                epoch_len=args.epoch_len,
+                accept_delta=args.accept_delta,
+                confirm_every=args.confirm_every,
+                n_drafts=args.drafts,
+                seed=args.seed,
+                lockbox_dir=None if args.no_lockbox else args.lockbox,
+                allow_no_lockbox=args.no_lockbox,
+                auth_mode=auth_mode,
+                feedback=args.feedback,
+                log_dir=args.log_dir,
+                stream=args.stream,
+                headroom_only=args.headroom,
+                max_wallclock_s=args.max_hours * 3600 if args.max_hours else None,
+                on_select=on_select,
+                on_island=on_island,
+                on_generation=on_generation,
+                on_bench_done=on_done,
+            )
+        )
+        print(f"\n=== archipelago finished: {args.islands} island(s), merged into {run.merged.version} ===")
+        for isl in run.islands:
+            print(
+                f"  island {isl.index}: champion {isl.run.champion} "
+                f"({isl.run.accepted}/{len(isl.run.generations)} accepted, {len(isl.task_ids)} task(s))"
+            )
+        print(f"  meta-rules (the merge's rationale):\n{run.merged.rationale}")
+        st, mt = run.seed_test, run.merged_test
+        print(
+            f"  full working test (cross-island validation): seed {st.passed}/{st.total} ({st.rate:.0%}) -> "
+            f"merged {mt.passed}/{mt.total} ({mt.rate:.0%})"
+        )
+        if run.lockbox_drafts is not None and run.lockbox_baseline_drafts is not None:
+            print_drafts(run.lockbox_baseline_drafts, run.lockbox_drafts)
+            print(f"  LOCKBOX mean Δ (seed -> merged over {args.drafts} draft(s)): {run.lockbox_mean_delta:+.0%}")
+        else:
+            print("  lockbox not opened — no generalisation claim from this run", file=sys.stderr)
+        return 0
+
     run = asyncio.run(
         run_evolve(
             cfg=cfg,
@@ -796,13 +864,7 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
     print(f"  champion: rulebook {run.champion}  ({run.accepted}/{len(run.generations)} generation(s) accepted)")
     print(f"  journal: {run.journal_path}")
     if run.lockbox_drafts is not None and run.lockbox_baseline_drafts is not None:
-        shown = {ds.version: ds for ds in (run.lockbox_baseline_drafts, run.lockbox_drafts)}
-        for ds in shown.values():
-            per = "  ".join(
-                f"d{i} {s.passed}/{s.total} ({size / 1024:.1f}KB)"
-                for i, (s, size) in enumerate(zip(ds.scores, ds.sizes, strict=True), start=1)
-            )
-            print(f"  lockbox drafts of {ds.version}: {per}   mean {ds.mean_rate:.0%}, spread {ds.spread:.0%}")
+        print_drafts(run.lockbox_baseline_drafts, run.lockbox_drafts)
         print(f"  LOCKBOX mean Δ (seed -> champion over {args.drafts} draft(s)): {run.lockbox_mean_delta:+.0%}")
     else:
         print("  lockbox not opened — no generalisation claim from this run", file=sys.stderr)
@@ -1315,7 +1377,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="evolve only on tasks the no-skill baseline does not already pass on the test split "
         "(per config model; needs prior `bench --no-skill` runs — unscreened tasks are left out)",
     )
-    evolve.add_argument("--generations", type=int, default=20, help="generation budget (default 20)")
+    evolve.add_argument("--generations", type=int, default=20, help="generation budget (default 20; per island)")
+    evolve.add_argument(
+        "--islands",
+        type=int,
+        metavar="K",
+        help="evolve K independent islands on disjoint task partitions, then cross-pollinate the "
+        "champions into one merged rulebook (meta-rules = edits that replicated across islands)",
+    )
     evolve.add_argument(
         "--screen-size", type=int, default=12, help="tasks per screen subset (cheap, noisy tier; default 12)"
     )
