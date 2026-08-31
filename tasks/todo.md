@@ -49,9 +49,16 @@ build plan + decisions: `tasks/build-plan.md`.
 - [ ] Fix the stale `paused` retry ergonomics: `run_round2.sh`'s blind 30-min retry misses resets that
       fall past its last attempt; parse the `resets HH:MM` from the CLI message instead.
 
-- [ ] Improve-step evidence: in both rounds the 2nd iteration regressed out of sample (over-fitting
-      residual train failures). Options: improve from fold-external failures only, cap edit size,
-      or require CV gain before carrying. Decide after N-draft scoring lands.
+- [x] Improve-step evidence → reshaped into **`acumen evolve`** (2026-08-31, user steer: hundreds of
+      generations of wild edits, reliably measured): improve-from-best always, 8 rotating exploration
+      directives, cheap rotating 12-task screens (accept ≥ +2), full-bench ratchet every 5 accepts
+      with revert, `runs/evolve.jsonl` decision archive, deterministic resume, lockbox once at end
+      over `--drafts` (default 3). `src/acumen/evolve.py` + CLI + 6 tests. Not yet run live.
+- [ ] **Islands + cross-pollination** (designed, not built): k independent `evolve` runs on disjoint
+      task partitions (`evaluate_lockbox=False`), then a meta-agent mines the journals/diffs for
+      edits replicating across ≥2 islands → meta-rules → merged rulebook; validate cross-island;
+      only the merged champion opens the lockbox. Calibrate `--accept-delta` from the variance
+      experiment before the first live evolve run.
 - [ ] Targeted coverage backfill: `coverage --queue` → `tasks --feedback` naming the 21 taught-but-
       unverified symbols (mostly `calculate_niche*`, loaders); remaining 201 mined candidates.
 - [ ] Report the lockbox Δ on its hard subset (14 tasks noskill fails) beside the full 36.

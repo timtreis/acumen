@@ -15,6 +15,7 @@ from acumen.coverage import CoverageError, inventory_in_venv, load_scripts, meas
 from acumen.difficulty import HeadroomSelection, screen
 from acumen.draft import DraftError, draft_skill
 from acumen.env import DEFAULT_CACHE_ROOT, AuthMode, EnvError, Target, prepare_target, resolve_auth_mode
+from acumen.evolve import Generation, run_evolve
 from acumen.folds import FoldError, split_lockbox, write_lockbox
 from acumen.improve import ImproveError, improve_skill
 from acumen.logs import LiveLog
@@ -717,6 +718,97 @@ def _print_cv(result: CVResult) -> None:
     print(f"  rulebook rationale: {result.carried.rationale}")
 
 
+def _cmd_evolve(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    tasks = load_tasks(args.tasks)
+    if args.max_concurrency:
+        cfg = replace(cfg, max_concurrency=args.max_concurrency)
+    auth_mode = resolve_auth_mode(args.auth)
+    _print_auth(auth_mode)
+    print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
+    target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
+    print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
+    if cfg.dataset_cache_dirs and not args.no_warm:
+        _warm_cache(cfg, target, args.tasks)
+    print(
+        f"EVOLVE: {args.generations} generation(s); screen {args.screen_size} task(s), rotated every "
+        f"{args.epoch_len} generation(s); accept at >= +{args.accept_delta} screen passes; full-bench "
+        f"confirmation every {args.confirm_every} accept(s); {args.drafts} lockbox draft(s)/version"
+        + ("; NO LOCKBOX" if args.no_lockbox else f"; lockbox {args.lockbox}"),
+        flush=True,
+    )
+
+    def on_done(outcome: RunOutcome) -> None:
+        mark = "✓" if outcome.success else "✗"
+        k = outcome.key
+        print(f"  {mark} {k.split}/{k.task_id}/rep_{k.rep} ({outcome.reason})", flush=True)
+
+    def on_select(selection: HeadroomSelection) -> None:
+        print(
+            f"headroom selection: kept {len(selection.selected)} task(s); "
+            f"{len(selection.solved)} baseline-solved and {len(selection.unscreened)} unscreened left out",
+            flush=True,
+        )
+
+    def on_generation(gen: Generation) -> None:
+        ch, c = gen.champion_screen, gen.candidate_screen
+        verdict = "ACCEPT" if gen.accepted else "reject"
+        if gen.confirm_ran:
+            verdict += " -> " + ("CONFIRMED on full bench" if gen.confirm_promoted else "REVERTED on full bench")
+        print(f"\n=== generation {gen.index}: {gen.parent} -> {gen.candidate}  [{verdict}] ===")
+        print(f"  directive: {gen.directive}")
+        print(
+            f"  screen ({len(gen.subset)} tasks): champion {ch.passed}/{ch.total} vs candidate "
+            f"{c.passed}/{c.total};  confirmed champion: {gen.confirmed}",
+            flush=True,
+        )
+
+    run = asyncio.run(
+        run_evolve(
+            cfg=cfg,
+            target=target,
+            skills_root=args.skills,
+            rulebooks_root=args.rulebooks,
+            runs_root=args.runs,
+            tasks=tasks,
+            generations=args.generations,
+            screen_size=args.screen_size,
+            epoch_len=args.epoch_len,
+            accept_delta=args.accept_delta,
+            confirm_every=args.confirm_every,
+            n_drafts=args.drafts,
+            seed=args.seed,
+            lockbox_dir=None if args.no_lockbox else args.lockbox,
+            allow_no_lockbox=args.no_lockbox,
+            auth_mode=auth_mode,
+            feedback=args.feedback,
+            log_dir=args.log_dir,
+            stream=args.stream,
+            headroom_only=args.headroom,
+            max_wallclock_s=args.max_hours * 3600 if args.max_hours else None,
+            on_select=on_select,
+            on_generation=on_generation,
+            on_bench_done=on_done,
+        )
+    )
+
+    print(f"\n=== evolution finished: {run.stopped_because} ===")
+    print(f"  champion: rulebook {run.champion}  ({run.accepted}/{len(run.generations)} generation(s) accepted)")
+    print(f"  journal: {run.journal_path}")
+    if run.lockbox_drafts is not None and run.lockbox_baseline_drafts is not None:
+        shown = {ds.version: ds for ds in (run.lockbox_baseline_drafts, run.lockbox_drafts)}
+        for ds in shown.values():
+            per = "  ".join(
+                f"d{i} {s.passed}/{s.total} ({size / 1024:.1f}KB)"
+                for i, (s, size) in enumerate(zip(ds.scores, ds.sizes, strict=True), start=1)
+            )
+            print(f"  lockbox drafts of {ds.version}: {per}   mean {ds.mean_rate:.0%}, spread {ds.spread:.0%}")
+        print(f"  LOCKBOX mean Δ (seed -> champion over {args.drafts} draft(s)): {run.lockbox_mean_delta:+.0%}")
+    else:
+        print("  lockbox not opened — no generalisation claim from this run", file=sys.stderr)
+    return 0
+
+
 def _cmd_loop(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     tasks = load_tasks(args.tasks)
@@ -1202,6 +1294,62 @@ def build_parser() -> argparse.ArgumentParser:
     _add_feedback_arg(loop)
     _add_log_args(loop)
     loop.set_defaults(func=_cmd_loop)
+
+    evolve = sub.add_parser(
+        "evolve",
+        help="generational rulebook evolution: improve-from-best under rotating exploration "
+        "directives, screened on rotating task subsets, ratcheted by full-bench confirmation",
+    )
+    evolve.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
+    evolve.add_argument("--tasks", type=Path, default=Path("tasks.yaml"), help="path to tasks.yaml")
+    evolve.add_argument("--skills", type=Path, default=Path("skills"), help="root of the skill tree")
+    evolve.add_argument("--rulebooks", type=Path, default=Path("rulebooks"), help="root of the rulebook tree")
+    evolve.add_argument("--runs", type=Path, default=Path("runs"), help="root of the run tree")
+    evolve.add_argument("--max-concurrency", type=int, help="override config max_concurrency")
+    evolve.add_argument("--cache", type=Path, default=DEFAULT_CACHE_ROOT, help="target cache root")
+    evolve.add_argument("--refresh-target", action="store_true", help="rebuild the target checkout and venv")
+    evolve.add_argument("--no-warm", action="store_true", help="skip pre-downloading datasets into the shared cache")
+    evolve.add_argument(
+        "--headroom",
+        action="store_true",
+        help="evolve only on tasks the no-skill baseline does not already pass on the test split "
+        "(per config model; needs prior `bench --no-skill` runs — unscreened tasks are left out)",
+    )
+    evolve.add_argument("--generations", type=int, default=20, help="generation budget (default 20)")
+    evolve.add_argument(
+        "--screen-size", type=int, default=12, help="tasks per screen subset (cheap, noisy tier; default 12)"
+    )
+    evolve.add_argument(
+        "--epoch-len", type=int, default=5, help="generations before the screen subset rotates (default 5)"
+    )
+    evolve.add_argument(
+        "--accept-delta",
+        type=int,
+        default=2,
+        help="screen passes a candidate must beat the champion by (the noise floor; default 2)",
+    )
+    evolve.add_argument(
+        "--confirm-every",
+        type=int,
+        default=5,
+        help="screen accepts between full-bench confirmations of the champion (the ratchet; default 5)",
+    )
+    evolve.add_argument(
+        "--drafts",
+        type=int,
+        default=3,
+        help="independent skill drafts per version for the final lockbox verdict (default 3)",
+    )
+    evolve.add_argument("--seed", type=int, default=0, help="screen-subset rotation seed (default 0)")
+    evolve.add_argument("--max-hours", type=float, help="wall-clock cap, checked between generations")
+    evolve.add_argument("--lockbox", type=Path, default=Path("lockbox"), help="lockbox dir from `acumen lockbox`")
+    evolve.add_argument(
+        "--no-lockbox", action="store_true", help="run without a lockbox (no generalisation claim possible)"
+    )
+    _add_auth_arg(evolve)
+    _add_feedback_arg(evolve)
+    _add_log_args(evolve)
+    evolve.set_defaults(func=_cmd_evolve)
 
     ship = sub.add_parser("ship", help="make a benchmarked skill installable into the target package")
     ship.add_argument(

@@ -1023,3 +1023,35 @@ variant layout, per-draft lockbox benches in their own trees, deny_dirs, primary
 and agent-free resume. Not yet run live: the variance experiment (B) is the first consumer — with
 this landed it's just a rerun of the finished round-2 loop with `--drafts 3` appended (resume
 leaves v1/v4 primaries cached; ~4 h of lockbox benches for the 4 new drafts).
+
+## 2026-08-31 — `acumen evolve`: generational improve-from-best (task C, reshaped)
+
+The user's steer: hundreds of generations of potentially wild rulebook edits, reliably measured —
+the CV loop's ~6 h/iteration can't carry that, and its chain walks through regressions. New module
+`evolve.py`:
+
+- **Improve from the best, always** — every generation's improve agent starts from the current
+  champion; rejected candidates keep their version dirs but nothing descends from them.
+- **Rotating exploration directives** (8: focused repair, bold restructure, aggressive deletion,
+  concretization, loading/routing, assumption-inversion, generalization, free choice) injected as
+  maintainer feedback — recorded in each version's meta.json.
+- **Two-tier selection**: cheap screen (12-task rotating subset, seeded per epoch) decides
+  accept/reject at `accept_delta` passes (noise floor — calibrate from the variance experiment);
+  the *confirmed* champion only changes on a full headroom-test bench every `confirm_every`
+  accepts, and a failed confirmation reverts. Screens may thrash; the ratchet may not.
+- **Archive**: one JSON line per generation (`runs/evolve.jsonl`) — directive, versions, subset,
+  scores, decision — the dataset a cross-pollination step will mine.
+- **Determinism = resume**: directive, subset, and candidate version are pure functions of
+  (generation, seed); a resumed run replays every decision from on-disk scores, zero agents.
+- Lockbox unchanged: opened once at the end, champion + seed over `--drafts` (default 3);
+  `evaluate_lockbox=False` for future island runs, which never open it.
+
+Cost/generation ≈ improve + draft + ~12–24 screen benches ≈ 45–60 min at 2-concurrency.
+Next layer (designed with the user, not yet built): **islands** — k independent evolve runs on
+disjoint task partitions, then a cross-pollination meta-agent that distills edits replicating
+across ≥2 islands into meta-rules; validation = an edit that won on island A must hold on island
+B's tasks. Only the merged champion opens the lockbox.
+
+210 tests (was 204): directive/subset determinism, improve-from-best after reject AND after a
+reverted confirmation, ratchet promote/revert, journal idempotence, agent-free resume, parameter
+validation, lockbox denial. Not yet run live (variance experiment occupies the session window).
