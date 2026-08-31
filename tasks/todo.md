@@ -37,10 +37,14 @@ build plan + decisions: `tasks/build-plan.md`.
 - [x] Fixes found live: task-gen pause, 45-min Bash timeout (harness backgrounding), frontmatter
       normalization, transient draft failures as pauses.
 
-## Next
+## Next  — detailed playbook: `tasks/next-session.md`
 - [ ] **Score a rulebook over N drafts** (mean ± spread; pick by mean). Draft variance ≈ effect size
       today, so every single-draft number is a sample of one. Loop change in `_ensure_skill`/`_bench`
       + report. Then re-measure r2-v4 vs r2-v1 with N=3 on the lockbox to see what survives.
+      **Awaiting the user's "build it" (proposed 2026-08-30, end of round 2); the variance experiment
+      (~216 lockbox runs ≈ 4 h ≈ one session window) follows on a separate go.**
+- [ ] Fix the stale `paused` retry ergonomics: `run_round2.sh`'s blind 30-min retry misses resets that
+      fall past its last attempt; parse the `resets HH:MM` from the CLI message instead.
 
 - [ ] Improve-step evidence: in both rounds the 2nd iteration regressed out of sample (over-fitting
       residual train failures). Options: improve from fold-external failures only, cap edit size,
