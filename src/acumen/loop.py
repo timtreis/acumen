@@ -397,16 +397,19 @@ async def _ensure_skill(
     rationale: str,
     log_dir: Path | None,
     stream: bool,
+    log_name: str | None = None,
 ) -> tuple[Skill, float]:
     """Draft a skill from ``rulebook_text`` if ``expect_version`` isn't present, else load it.
 
     Resume-friendly: a re-run reuses an already-drafted skill instead of erroring on the immutable
     version. Asserts the drafted version matches ``expect_version`` so the rulebook<->skill lockstep
-    the loop relies on can't silently drift.
+    the loop relies on can't silently drift. ``log_name`` disambiguates the live log when several
+    roots draft the same ``expect_version`` (extra drafts are all ``v1`` in their own trees).
     """
     if expect_version in available_versions(skills_root):
         return load_skill(skills_root, expect_version, expect_name=cfg.skill_name), 0.0
-    log = LiveLog.open(log_dir, f"loop-draft-{expect_version}", stream=stream) if log_dir is not None else None
+    name = log_name or f"loop-draft-{expect_version}"
+    log = LiveLog.open(log_dir, name, stream=stream) if log_dir is not None else None
     try:
         result = await draft_skill(
             cfg=cfg,
@@ -434,6 +437,59 @@ async def _ensure_skill(
             "rulebook/skill version lockstep is broken; run the loop in a clean workspace"
         )
     return result.skill, result.cost_usd
+
+
+async def _ensure_skill_variants(
+    *,
+    cfg: Config,
+    target: Target,
+    skills_root: Path,
+    rulebooks_root: Path,
+    version: str,
+    n: int,
+    auth_mode: AuthMode,
+    log_dir: Path | None,
+    stream: bool,
+) -> tuple[list[Skill], float]:
+    """Ensure ``n`` independently drafted skills of rulebook ``version`` exist; return them, primary first.
+
+    Draft 1 is the primary ``skills/<version>`` (drafted anyway by the loop); drafts 2..n live at
+    :func:`draft_variant_root` — each its own skills-root holding a single ``v1``, so the ``vN``
+    lockstep of the main tree is untouched. Resume-friendly like everything else: a present draft is
+    loaded, not re-drafted, so re-running with a larger ``n`` only adds the missing drafts.
+    """
+    text = rb.load_rulebook(rulebooks_root, version).text
+    total_cost = 0.0
+    skills: list[Skill] = []
+    primary, cost = await _ensure_skill(
+        cfg=cfg,
+        target=target,
+        skills_root=skills_root,
+        rulebook_text=text,
+        expect_version=version,
+        auth_mode=auth_mode,
+        rationale=f"drafted from rulebook {version}",
+        log_dir=log_dir,
+        stream=stream,
+    )
+    skills.append(primary)
+    total_cost += cost
+    for i in range(2, n + 1):
+        extra, cost = await _ensure_skill(
+            cfg=cfg,
+            target=target,
+            skills_root=draft_variant_root(skills_root, version, i),
+            rulebook_text=text,
+            expect_version="v1",
+            auth_mode=auth_mode,
+            rationale=f"extra draft d{i} of rulebook {version} — draft-variance sample",
+            log_dir=log_dir,
+            stream=stream,
+            log_name=f"loop-draft-{version}-d{i}",
+        )
+        skills.append(extra)
+        total_cost += cost
+    return skills, total_cost
 
 
 async def _ensure_rulebook(
@@ -693,6 +749,58 @@ CV_DIRNAME = "cv"
 #: later iteration must not learn anything from how an earlier version did on the lockbox.
 LOCKBOX_RUNS_DIRNAME = "lockbox"
 
+#: Subdirectory (under skills/ and runs/) holding *extra drafts* of a version — same rulebook text,
+#: independently drafted skills — used to score a rulebook as mean ± spread instead of a sample of
+#: one. Measured 2026-08-30: two drafts of the same rulebook text differed on 9/36 lockbox tasks
+#: (27 vs 22 passes), i.e. draft variance ≈ the effect size under study. Denied to every improve
+#: agent alongside the lockbox trees.
+DRAFTS_DIRNAME = "drafts"
+
+
+def draft_variant_root(root: Path, version: str, i: int) -> Path:
+    """Where draft ``i`` (>= 2) of ``version`` lives under a skills or runs root.
+
+    Draft 1 is the primary draft at ``root/<version>`` (the rulebook<->skill lockstep the loop
+    relies on); extras are each their own single-version tree, so nothing about the ``vN`` naming
+    contract changes: ``root/drafts/<version>/d<i>`` holds a ``v1`` skill (or that skill's runs).
+    """
+    return root / DRAFTS_DIRNAME / version / f"d{i}"
+
+
+@dataclass(frozen=True)
+class DraftScores:
+    """One rulebook version scored over N independently drafted skills on the same tasks.
+
+    Index 0 is the primary draft (``skills/<version>``); the rest are the extra drafts under
+    ``skills/drafts/<version>/``. The mean is the version's score; the spread is the measured
+    draft-to-draft noise a single-draft number hides.
+    """
+
+    version: str
+    scores: list[Score]
+    #: Each draft's content size in bytes (the leanness axis varies across drafts too).
+    sizes: list[int]
+
+    @property
+    def rates(self) -> list[float]:
+        """Per-draft pass rates, primary first."""
+        return [s.rate for s in self.scores]
+
+    @property
+    def mean_rate(self) -> float:
+        """Mean pass rate over drafts — the version's score under N-draft scoring."""
+        return sum(self.rates) / len(self.scores) if self.scores else 0.0
+
+    @property
+    def spread(self) -> float:
+        """Max minus min draft pass rate: the draft-to-draft noise, as a rate."""
+        return (max(self.rates) - min(self.rates)) if self.scores else 0.0
+
+    @property
+    def mean_load_rate(self) -> float:
+        """Mean skill-load rate over drafts."""
+        return sum(s.load_rate for s in self.scores) / len(self.scores) if self.scores else 0.0
+
 
 @dataclass(frozen=True)
 class FoldResult:
@@ -902,7 +1010,7 @@ async def run_cv_iteration(
     # Denied to every improve agent this iteration: the lockbox and all CV trees (a fold must not
     # read another fold's held-out runs, which may be its own optimize tasks' answers).
     cv_root = runs_root / CV_DIRNAME
-    deny_dirs: list[Path] = [cv_root, runs_root / LOCKBOX_RUNS_DIRNAME]
+    deny_dirs: list[Path] = [cv_root, runs_root / LOCKBOX_RUNS_DIRNAME, runs_root / DRAFTS_DIRNAME]
     if lockbox is not None:
         deny_dirs.append(lockbox.directory)
 
@@ -1088,19 +1196,35 @@ class LoopRun:
     best_version: str
     best_cv_rate: float
     stopped_because: str
-    #: The chosen version's skill on the lockbox tasks (test split), scored once, after every
-    #: selection was made. ``None`` without a lockbox.
+    #: The chosen version's *primary* skill draft on the lockbox tasks (test split), scored once,
+    #: after every selection was made. ``None`` without a lockbox.
     lockbox_score: Score | None = None
-    #: The seed version's skill on the same lockbox tasks — the floor the pick is compared to.
+    #: The seed version's primary draft on the same lockbox tasks — the floor the pick is compared to.
     lockbox_baseline: Score | None = None
+    #: With ``n_drafts > 1``: every draft of the pick / the seed on the lockbox (index 0 == the
+    #: primary scores above). The mean is the version's score; the spread is the draft noise.
+    lockbox_drafts: DraftScores | None = None
+    lockbox_baseline_drafts: DraftScores | None = None
     cost_usd: float = 0.0
 
     @property
     def lockbox_delta(self) -> float | None:
-        """Lockbox pass-rate change from the seed version to the pick — the one honest number."""
+        """Lockbox pass-rate change from the seed version to the pick, over the primary drafts."""
         if self.lockbox_score is None or self.lockbox_baseline is None:
             return None
         return self.lockbox_score.rate - self.lockbox_baseline.rate
+
+    @property
+    def lockbox_mean_delta(self) -> float | None:
+        """Lockbox mean-rate change over all drafts — the honest number once draft variance is scored.
+
+        Equal to :attr:`lockbox_delta` when ``n_drafts == 1``; with more drafts this is the number
+        to trust, since a single draft of the same rulebook text has been measured to move 9/36
+        lockbox tasks on its own.
+        """
+        if self.lockbox_drafts is None or self.lockbox_baseline_drafts is None:
+            return self.lockbox_delta
+        return self.lockbox_drafts.mean_rate - self.lockbox_baseline_drafts.mean_rate
 
 
 def _cv_rates(result: CVResult) -> tuple[float, float]:
@@ -1117,34 +1241,55 @@ async def _lockbox_eval(
     cfg: Config,
     target: Target,
     skills_root: Path,
+    rulebooks_root: Path,
     runs_root: Path,
     version: str,
+    n_drafts: int,
     tasks: Sequence[Task],
     auth_mode: AuthMode,
     max_concurrency: int,
+    log_dir: Path | None,
+    stream: bool,
     on_bench_start: Callable[[PlannedRun], None] | None,
     on_bench_done: Callable[[RunOutcome], None] | None,
-) -> Score:
-    """Score one skill version on the lockbox tasks' test split, into its own run tree.
+) -> DraftScores:
+    """Score every draft of one rulebook version on the lockbox tasks' test split.
 
-    Resumable by file presence, which is what "scored once" means operationally: a version is
-    benched on the lockbox at most once, however many times the loop is re-run.
+    The primary draft's runs land in ``runs/lockbox/`` as before; each extra draft benches into its
+    own tree (``runs/drafts/<version>/d<i>/lockbox/``), so no arm collides. Resumable by file
+    presence, which is what "scored once" means operationally: each draft is benched on the lockbox
+    at most once, however many times the loop is re-run — and re-running with a larger ``n_drafts``
+    only adds the missing drafts.
     """
-    skill = load_skill(skills_root, version, expect_name=cfg.skill_name)
-    planned = await _bench(
+    skills, _ = await _ensure_skill_variants(
         cfg=cfg,
         target=target,
-        skill=skill,
-        tasks=tasks,
-        runs_root=runs_root / LOCKBOX_RUNS_DIRNAME,
-        splits=["test"],
+        skills_root=skills_root,
+        rulebooks_root=rulebooks_root,
+        version=version,
+        n=n_drafts,
         auth_mode=auth_mode,
-        task_ids=None,
-        max_concurrency=max_concurrency,
-        on_start=on_bench_start,
-        on_done=on_bench_done,
+        log_dir=log_dir,
+        stream=stream,
     )
-    return score(runs_root / LOCKBOX_RUNS_DIRNAME, planned)
+    scores: list[Score] = []
+    for i, skill in enumerate(skills, start=1):
+        root = runs_root if i == 1 else draft_variant_root(runs_root, version, i)
+        planned = await _bench(
+            cfg=cfg,
+            target=target,
+            skill=skill,
+            tasks=tasks,
+            runs_root=root / LOCKBOX_RUNS_DIRNAME,
+            splits=["test"],
+            auth_mode=auth_mode,
+            task_ids=None,
+            max_concurrency=max_concurrency,
+            on_start=on_bench_start,
+            on_done=on_bench_done,
+        )
+        scores.append(score(root / LOCKBOX_RUNS_DIRNAME, planned))
+    return DraftScores(version=version, scores=scores, sizes=[s.size for s in skills])
 
 
 async def run_loop(
@@ -1157,6 +1302,7 @@ async def run_loop(
     tasks: Sequence[Task],
     k: int = 3,
     seed: int = 0,
+    n_drafts: int = 1,
     stop: StopRule = StopRule(),
     lockbox_dir: Path | None = None,
     allow_no_lockbox: bool = False,
@@ -1185,7 +1331,15 @@ async def run_loop(
     the chosen version and the seed version are benched on the **lockbox** tasks, a set nothing in
     the loop ever read. The lockbox delta is the loop's one honest generalisation number; the CV
     numbers are its working estimates.
+
+    With ``n_drafts > 1`` the lockbox verdict is scored over N independently drafted skills per
+    version (mean ± spread, :class:`DraftScores`) instead of a single draft — measured draft
+    variance is ≈ the effect size, so a single-draft lockbox number is a sample of one. Staged
+    scope: CV folds (and therefore the pick) stay single-draft for now — k×N would multiply agent
+    cost — extend to folds only if fold noise turns out to be dominated by draft noise.
     """
+    if n_drafts < 1:
+        raise LoopError(f"n_drafts must be >= 1, got {n_drafts}")
     started = clock()
     concurrency = max_concurrency or cfg.max_concurrency
     history: list[CVResult] = []
@@ -1245,7 +1399,8 @@ async def run_loop(
                 reason = f"no CV improvement over {best_version} for {stop.patience} iteration(s)"
                 break
 
-    lockbox_score = lockbox_baseline = None
+    baseline_drafts: DraftScores | None = None
+    pick_drafts: DraftScores | None = None
     box = history[-1].lockbox if history else None
     if box is not None:
         lock_tasks = load_lockbox_tasks(box)
@@ -1253,24 +1408,28 @@ async def run_loop(
             "cfg": cfg,
             "target": target,
             "skills_root": skills_root,
+            "rulebooks_root": rulebooks_root,
             "runs_root": runs_root,
+            "n_drafts": n_drafts,
             "tasks": lock_tasks,
             "auth_mode": auth_mode,
             "max_concurrency": concurrency,
+            "log_dir": log_dir,
+            "stream": stream,
             "on_bench_start": on_bench_start,
             "on_bench_done": on_bench_done,
         }
-        lockbox_baseline = await _lockbox_eval(version="v1", **common)
-        lockbox_score = (
-            lockbox_baseline if best_version == "v1" else await _lockbox_eval(version=best_version, **common)
-        )
+        baseline_drafts = await _lockbox_eval(version="v1", **common)
+        pick_drafts = baseline_drafts if best_version == "v1" else await _lockbox_eval(version=best_version, **common)
 
     return LoopRun(
         iterations=history,
         best_version=best_version,
         best_cv_rate=max(best_rate, 0.0),
         stopped_because=reason,
-        lockbox_score=lockbox_score,
-        lockbox_baseline=lockbox_baseline,
+        lockbox_score=pick_drafts.scores[0] if pick_drafts is not None else None,
+        lockbox_baseline=baseline_drafts.scores[0] if baseline_drafts is not None else None,
+        lockbox_drafts=pick_drafts,
+        lockbox_baseline_drafts=baseline_drafts,
         cost_usd=total_cost,
     )

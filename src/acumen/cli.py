@@ -762,6 +762,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
         print(
             f"CV loop: k={args.cv}, up to {stop.max_iterations} iteration(s), patience {stop.patience}"
             + (f", wall-clock cap {args.max_hours:g}h" if args.max_hours else "")
+            + (f", {args.drafts} lockbox drafts/version" if args.drafts > 1 else "")
             + ("; NO LOCKBOX" if args.no_lockbox else f"; lockbox {args.lockbox}"),
             flush=True,
         )
@@ -783,6 +784,7 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 tasks=tasks,
                 k=args.cv,
                 seed=args.seed,
+                n_drafts=args.drafts,
                 stop=stop,
                 lockbox_dir=None if args.no_lockbox else args.lockbox,
                 allow_no_lockbox=args.no_lockbox,
@@ -810,6 +812,15 @@ def _cmd_loop(args: argparse.Namespace) -> int:
                 f"  LOCKBOX (scored once, never selected on): v1 {lb.passed}/{lb.total} ({lb.rate:.0%})  ->  "
                 f"{run.best_version} {ls.passed}/{ls.total} ({ls.rate:.0%})   Δ {run.lockbox_delta:+.0%}"
             )
+            if args.drafts > 1 and run.lockbox_drafts is not None and run.lockbox_baseline_drafts is not None:
+                shown = {ds.version: ds for ds in (run.lockbox_baseline_drafts, run.lockbox_drafts)}
+                for ds in shown.values():
+                    per = "  ".join(
+                        f"d{i} {s.passed}/{s.total} ({size / 1024:.1f}KB)"
+                        for i, (s, size) in enumerate(zip(ds.scores, ds.sizes, strict=True), start=1)
+                    )
+                    print(f"    drafts of {ds.version}: {per}   mean {ds.mean_rate:.0%}, spread {ds.spread:.0%}")
+                print(f"    LOCKBOX mean Δ over {args.drafts} draft(s): {run.lockbox_mean_delta:+.0%}")
         else:
             print("  no lockbox — no generalisation claim can be made from this run", file=sys.stderr)
         return 0
@@ -1176,6 +1187,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-delta", type=float, default=0.0, help="with --cv: CV rate gain that counts as improvement (0)"
     )
     loop.add_argument("--max-hours", type=float, help="with --cv: wall-clock cap, checked between iterations")
+    loop.add_argument(
+        "--drafts",
+        type=int,
+        default=1,
+        help="with --cv: score the lockbox verdict over N independent skill drafts per version "
+        "(mean ± spread; default 1 = single-draft)",
+    )
     loop.add_argument("--lockbox", type=Path, default=Path("lockbox"), help="lockbox dir from `acumen lockbox`")
     loop.add_argument(
         "--no-lockbox", action="store_true", help="run --cv without a lockbox (no generalisation claim possible)"

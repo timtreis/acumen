@@ -202,7 +202,7 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
 
 
 def normalize_frontmatter(text: str) -> str:
-    """Quote frontmatter scalars YAML would misread, leaving valid frontmatter untouched.
+    r"""Quote frontmatter scalars YAML would misread, leaving valid frontmatter untouched.
 
     A drafting agent writes ``description: Analyze data (Visium: yes) — use when …`` and YAML
     rejects the second colon ("mapping values are not allowed here"). The content is fine; only the

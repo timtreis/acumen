@@ -22,9 +22,11 @@ from acumen.config import Config
 from acumen.env import Target
 from acumen.folds import write_lockbox
 from acumen.loop import (
+    DraftScores,
     LoopError,
     LoopResult,
     RulebookResult,
+    Score,
     StopRule,
     run_cv_iteration,
     run_iteration,
@@ -549,3 +551,100 @@ def test_draft_refused_by_the_platform_is_a_pause_not_a_failure(
     with pytest.raises(TransientLimitError, match="rerun to resume"):
         _run(tmp_path, cfg, calls)
     assert not (tmp_path / "skills" / "v1").exists()  # nothing written; resume starts at the draft
+
+
+# ── N-draft scoring (draft variance as a reported quantity) ─────────────────────────────
+
+
+def test_draft_scores_mean_and_spread() -> None:
+    ds = DraftScores(
+        version="v2",
+        scores=[Score(passed=27, total=36), Score(passed=22, total=36), Score(passed=29, total=36)],
+        sizes=[100, 200, 300],
+    )
+    assert ds.mean_rate == pytest.approx((27 + 22 + 29) / (3 * 36))
+    assert ds.spread == pytest.approx((29 - 22) / 36)
+    empty = DraftScores(version="v1", scores=[], sizes=[])
+    assert empty.mean_rate == 0.0 and empty.spread == 0.0 and empty.mean_load_rate == 0.0
+
+
+def test_run_loop_rejects_a_draft_count_below_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1)
+    _install_cv_fakes(monkeypatch, cfg, {"draft": 0, "bench": 0, "improve": 0}, [])
+    with pytest.raises(LoopError, match="n_drafts"):
+        asyncio.run(
+            run_loop(
+                cfg=cfg,
+                target=_target(tmp_path),
+                skills_root=tmp_path / "skills",
+                rulebooks_root=tmp_path / "rulebooks",
+                runs_root=tmp_path / "runs",
+                tasks=[_task(t) for t in ("a", "b", "c", "d")],
+                k=2,
+                n_drafts=0,
+                allow_no_lockbox=True,
+                auth_mode="session",
+            )
+        )
+
+
+def test_run_loop_n_drafts_scores_the_lockbox_over_variants_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With --drafts 3, v1 and the pick each get three independent drafts of the SAME rulebook text,
+    every draft is benched once on the lockbox in its own run tree, the primary draft keeps its
+    single-draft paths/fields, and a re-run replays everything from disk without spawning agents."""
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    improves: list[dict] = []
+    _install_cv_fakes(monkeypatch, cfg, calls, improves)
+    tasks = [_task(t) for t in ("a", "b", "c", "d")]
+    lockbox = write_lockbox(tmp_path / "lockbox", [_task("z1"), _task("z2")], seed=0, fraction=0.3, dump=dump_tasks)
+    kw = {
+        "cfg": cfg,
+        "target": _target(tmp_path),
+        "skills_root": tmp_path / "skills",
+        "rulebooks_root": tmp_path / "rulebooks",
+        "runs_root": tmp_path / "runs",
+        "tasks": tasks,
+        "k": 2,
+        "n_drafts": 3,
+        "stop": StopRule(max_iterations=5, patience=1),
+        "lockbox_dir": lockbox.directory,
+        "auth_mode": "session",
+    }
+
+    run = asyncio.run(run_loop(**kw))
+
+    assert run.best_version == "v2"
+    for version in ("v1", "v2"):
+        for i in (2, 3):
+            # Layout: each extra draft is its own skills-root holding a single v1 ...
+            skill_root = loop_mod.draft_variant_root(tmp_path / "skills", version, i)
+            assert (skill_root / "v1" / "SKILL.md").is_file()
+            # ... benched on exactly the lockbox tasks, test split, in its own run tree.
+            runs = loop_mod.draft_variant_root(tmp_path / "runs", version, i) / loop_mod.LOCKBOX_RUNS_DIRNAME
+            benched = {(p.parts[-5], p.parts[-4], p.parts[-2]) for p in runs.rglob("rep_1")}
+            assert benched == {("skill_v1", "test", "z1"), ("skill_v1", "test", "z2")}
+    # The primary drafts' lockbox runs stay exactly where single-draft mode put them.
+    lock_runs = tmp_path / "runs" / loop_mod.LOCKBOX_RUNS_DIRNAME
+    primary = {(p.parts[-5], p.parts[-2]) for p in lock_runs.rglob("rep_1")}
+    assert primary == {("skill_v1", "z1"), ("skill_v1", "z2"), ("skill_v2", "z1"), ("skill_v2", "z2")}
+
+    assert run.lockbox_drafts is not None and run.lockbox_baseline_drafts is not None
+    assert len(run.lockbox_drafts.scores) == len(run.lockbox_baseline_drafts.scores) == 3
+    assert all(s.total == 2 for s in run.lockbox_drafts.scores + run.lockbox_baseline_drafts.scores)
+    assert all(size > 0 for size in run.lockbox_drafts.sizes + run.lockbox_baseline_drafts.sizes)
+    # The compat fields are the primary draft's scores; the mean delta is defined and mean-based.
+    assert run.lockbox_score == run.lockbox_drafts.scores[0]
+    assert run.lockbox_baseline == run.lockbox_baseline_drafts.scores[0]
+    assert run.lockbox_mean_delta == run.lockbox_drafts.mean_rate - run.lockbox_baseline_drafts.mean_rate
+    # Every improve agent was denied the drafts run tree, alongside the CV trees and the lockbox.
+    assert improves and all(any(d.name == loop_mod.DRAFTS_DIRNAME for d in c["deny"]) for c in improves)
+
+    # Resume: everything is on disk, so no draft, bench, or improve agent runs again.
+    calls.update(draft=0, bench=0, improve=0)
+    again = asyncio.run(run_loop(**kw))
+    assert calls == {"draft": 0, "bench": 0, "improve": 0}
+    assert again.lockbox_mean_delta == run.lockbox_mean_delta
+    assert again.lockbox_drafts == run.lockbox_drafts

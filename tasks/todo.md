@@ -38,11 +38,14 @@ build plan + decisions: `tasks/build-plan.md`.
       normalization, transient draft failures as pauses.
 
 ## Next  — detailed playbook: `tasks/next-session.md`
-- [ ] **Score a rulebook over N drafts** (mean ± spread; pick by mean). Draft variance ≈ effect size
-      today, so every single-draft number is a sample of one. Loop change in `_ensure_skill`/`_bench`
-      + report. Then re-measure r2-v4 vs r2-v1 with N=3 on the lockbox to see what survives.
-      **Awaiting the user's "build it" (proposed 2026-08-30, end of round 2); the variance experiment
-      (~216 lockbox runs ≈ 4 h ≈ one session window) follows on a separate go.**
+- [x] **Score a rulebook over N drafts** (2026-08-31): `loop --cv K --drafts N` scores the lockbox
+      verdict as mean ± spread over N independent drafts per version (`DraftScores`,
+      `lockbox_mean_delta`). Extra drafts at `skills/drafts/vK/d<i>/`, benches at
+      `runs/drafts/vK/d<i>/lockbox/`, drafts tree denied to improve agents; primary paths unchanged
+      so finished runs resume. Staged: CV folds (the pick) stay single-draft. 204 tests.
+- [ ] **Variance experiment (B)**: rerun the finished round-2 loop command with `--drafts 3` — resume
+      reuses everything; only the 4 new drafts bench on the lockbox (~216 runs ≈ 4 h ≈ one session
+      window). Decides whether round 3 is warranted. **Needs the user's go.**
 - [ ] Fix the stale `paused` retry ergonomics: `run_round2.sh`'s blind 30-min retry misses resets that
       fall past its last attempt; parse the `resets HH:MM` from the CLI message instead.
 

@@ -1001,3 +1001,25 @@ selection for the improve agent deserves work too.
 
 Ops: ~6 session-limit pauses across the round; all clean; the retry wrapper + one manual relaunch.
 Cost: roughly $300 subscription usage for round 2.
+
+## 2026-08-31 — N-draft rulebook scoring (task A of the playbook)
+
+Draft variance (9/36 lockbox tasks between two drafts of identical rulebook text) made every
+single-draft number a sample of one. Now the lockbox verdict can be scored over N independent
+drafts per version: `loop --cv K --drafts N`.
+
+Design (as staged in tasks/next-session.md): draft 1 stays the primary `skills/vK` (lockstep
+untouched); drafts 2..N live at `skills/drafts/vK/d<i>/` — each its own skills-root holding a
+single v1 — and bench into `runs/drafts/vK/d<i>/lockbox/`, so no arm collides and the primary's
+existing lockbox runs keep their paths (a resumed run with `--drafts 3` only adds the two missing
+drafts). `runs/drafts` joined the CV/lockbox trees in every improve agent's deny_dirs.
+`DraftScores` reports per-draft rates + sizes, mean, and spread; `LoopRun` keeps the primary
+`lockbox_score`/`lockbox_baseline` fields and adds the draft sets plus `lockbox_mean_delta` (== the
+old delta at N=1). Staged scope, documented: CV folds — and therefore the pick — stay single-draft;
+extend only if the variance experiment shows fold noise is dominated by draft noise.
+
+Tests: 204 (was 201) — mean/spread math, n_drafts validation, and a full-loop test asserting the
+variant layout, per-draft lockbox benches in their own trees, deny_dirs, primary-path stability,
+and agent-free resume. Not yet run live: the variance experiment (B) is the first consumer — with
+this landed it's just a rerun of the finished round-2 loop with `--drafts 3` appended (resume
+leaves v1/v4 primaries cached; ~4 h of lockbox benches for the 4 new drafts).

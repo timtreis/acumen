@@ -41,3 +41,32 @@ Short rules discovered while working in this repo. Each has a Why.
   portable token with `claude setup-token`. Note `setup-token` dumps its whole TUI to stdout when
   redirected — extract the `sk-ant-oat01-…` substring, don't use the raw capture.
   Why: `resolve_auth_mode` fails preflight otherwise, even on a machine that's "logged in".
+
+- **A transient platform error must never become a `result.json`.** Session/usage/rate-limit and
+  overload errors (`runner.is_transient`) are returned flagged, unwritten; `run_matrix` /
+  `generate_tasks_sharded` pause (skip the queue) and raise `TransientLimitError` (CLI exit 3);
+  the improve/draft agents map the same errors to the same exception.
+  Why: the first live loop wrote 54 bogus "failures" in minutes when the limit hit — resume would
+  have kept them and the improver would have read them as evidence about the skill.
+
+- **Never write an extra file into a version directory after `meta.json`.** The content hash covers
+  every file except `meta.json`; a diff or note dropped in later makes the version read as tampered
+  on the next load (rulebook diffs live in `rulebooks/diffs/`, `rulebooks.diff_path`).
+  Why: round 1's multi-iteration resume died on exactly this; single-iteration runs never reload a
+  version, so the bug was invisible until then.
+
+- **The Claude Code harness backgrounds a Bash call that outlives its timeout — no tool flag to
+  deny.** Isolated agents get `BASH_DEFAULT_TIMEOUT_MS`/`BASH_MAX_TIMEOUT_MS` = 45 min in
+  `env.scrubbed_env`; the PreToolUse sync guard only covers the agent *choosing* to background.
+  Why: shards stalled "waiting for a notification" with zero denied tool calls.
+
+- **Agent-written YAML frontmatter is normalized, not failed.** An unquoted colon in `description:`
+  is the agent's content with our formatting constraint; `skills.normalize_frontmatter` re-quotes
+  (only when parsing fails) before validation. Why: a fold draft killed a whole loop run over quoting.
+
+- **`asyncio.as_completed` launches in arbitrary order — never write order-dependent tests over it.**
+  Key fakes off call-count, not task id. Why: two pause tests failed on this exact assumption.
+
+- **`pgrep -f <pattern>` inside a Monitor matches the monitor's own command line.** Key liveness on
+  the concrete worker process (e.g. `acumen loop --config`) or a stored pid, never on the wrapper
+  script's name. Why: monitors reported RUNNING long after the run died.
