@@ -32,3 +32,6 @@ report.html
 report.csv
 
 *ipynb*
+
+# acumen writes a live run log per command into ./logs by default
+logs/

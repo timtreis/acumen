@@ -291,12 +291,17 @@ def _cmd_draft(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Drafting the same rulebook into several skills is how a rulebook gets a mean and a spread
+    # instead of a single sample: same text, own --skills root per draft.
+    rulebook = args.rulebook.read_text() if args.rulebook else None
+
     auth_mode = resolve_auth_mode(args.auth)
     _print_auth(auth_mode)
     print(f"preparing target {cfg.repo}@{cfg.ref} ...", flush=True)
     target = prepare_target(cfg, args.cache, refresh=args.refresh_target)
     print(f"target ready: {target.fingerprint} @ {target.commit[:8]}", flush=True)
-    print(f"drafting with {cfg.draft_model} (this reads the package source) ...", flush=True)
+    source = "the package source" if rulebook is None else f"{args.rulebook} + the package source"
+    print(f"drafting with {cfg.draft_model} (this reads {source}) ...", flush=True)
 
     log = LiveLog.open(args.log_dir, "draft", stream=args.stream)
     print(f"log → {log.jsonl_path}", flush=True)
@@ -310,6 +315,8 @@ def _cmd_draft(args: argparse.Namespace) -> int:
                 max_turns=args.max_turns,
                 max_usd=args.max_usd,
                 feedback=args.feedback,
+                rulebook=rulebook,
+                rationale="initial draft" if rulebook is None else f"drafted from {args.rulebook}",
                 log=log,
             )
         )
@@ -1151,6 +1158,13 @@ def build_parser() -> argparse.ArgumentParser:
     bench.set_defaults(func=_cmd_bench)
 
     draft = sub.add_parser("draft", help="draft a skill from the target package's source")
+    draft.add_argument(
+        "--rulebook",
+        type=Path,
+        help="draft under the instructions in this rulebook file (from a rulebooks root, or "
+        "`acumen loop`/`evolve`); repeat into separate --skills roots to score a rulebook as a "
+        "mean over drafts instead of a single sample",
+    )
     draft.add_argument("--config", type=Path, default=Path("config.yaml"), help="path to config.yaml")
     draft.add_argument("--skills", type=Path, default=Path("skills"), help="root of the skill tree")
     draft.add_argument("--model", help="override config draft_model")

@@ -51,8 +51,30 @@ class RunOutcome:
 
 
 #: Substrings of an agent error that mark it as the platform's problem, not the run's: the
-#: subscription session/usage limit, API rate limiting, overload. Matched case-insensitively.
-_TRANSIENT_MARKERS = ("session limit", "usage limit", "rate limit", "rate_limit", "overloaded", " 429", " 529")
+#: subscription session/usage limit, API rate limiting, overload, or the machine losing the network.
+#: Matched case-insensitively. A dropped connection is as transient as a rate limit and just as
+#: silent: an overnight round-2 draft recorded 14 ENOTFOUND runs as task failures, which put that
+#: arm 9 tasks below its siblings and made a fine skill look like a bad one.
+_TRANSIENT_MARKERS = (
+    "session limit",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "overloaded",
+    " 429",
+    " 529",
+    "enotfound",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "eai_again",
+    "socket hang up",
+    "can't reach the api server",
+    "connection error",
+    " 502",
+    " 503",
+    " 504",
+)
 
 
 def is_transient(error: str) -> bool:

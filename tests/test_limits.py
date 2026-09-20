@@ -36,6 +36,18 @@ def test_is_transient_recognises_platform_limits() -> None:
     assert not is_transient("the agent wrote the wrong answer")
 
 
+def test_is_transient_recognises_a_dropped_network() -> None:
+    """A machine that loses the network says nothing about the task (round 2, draft v4/d3)."""
+    assert is_transient(
+        "ResultError: Claude Code returned an error result: API Error: Can't reach the API "
+        "server — check your internet or DNS (ENOTFOUND) (exit code: 1)"
+    )
+    assert is_transient("FetchError: request to https://api.anthropic.com failed, reason: ECONNRESET")
+    assert is_transient("Error: socket hang up")
+    assert is_transient("HTTP 503 Service Unavailable")
+    assert not is_transient("the notebook could not be found in the repository")
+
+
 def _tasks(n: int) -> list[Task]:
     return [Task(id=f"t{i}", train=TaskSplit("p", "A"), test=TaskSplit("p", "B")) for i in range(n)]
 

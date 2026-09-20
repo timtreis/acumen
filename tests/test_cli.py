@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -170,6 +171,39 @@ def test_draft_refuses_when_versions_exist(project: Path, skills_root: Path, cap
     assert exit_code == 2
     assert "skills already exist (v1)" in capsys.readouterr().err
     assert not (skills_root / "v2").exists()
+
+
+def test_draft_passes_a_rulebook_through(project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--rulebook reaches draft_skill, so N drafts of one rulebook are a CLI loop, not a script."""
+    book = tmp_path / "champion.md"
+    book.write_text("always check the units\n")
+    seen: dict[str, object] = {}
+
+    async def fake_draft(**kwargs: object) -> object:
+        seen.update(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("acumen.cli.resolve_auth_mode", lambda _: "api")
+    target = SimpleNamespace(fingerprint="fp", commit="0" * 40)
+    monkeypatch.setattr("acumen.cli.prepare_target", lambda *a, **k: target)
+    monkeypatch.setattr("acumen.cli.draft_skill", fake_draft)
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "draft",
+                "--config",
+                str(project / "config.yaml"),
+                "--skills",
+                str(tmp_path / "skills"),
+                "--rulebook",
+                str(book),
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+
+    assert seen["rulebook"] == "always check the units\n"
+    assert "champion.md" in str(seen["rationale"])
 
 
 def test_improve_without_a_skill_errors(project: Path, capsys: pytest.CaptureFixture) -> None:
