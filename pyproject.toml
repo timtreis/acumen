@@ -89,6 +89,9 @@ envs.hatch-test.dependency-groups = [ "dev", "test" ]
 [tool.ruff]
 line-length = 120
 src = [ "src" ]
+# Agent-written experiment data: ground-truth scripts and mined candidates are recorded exactly as
+# the agent produced them. Reformatting them would silently change what the benchmark verified.
+extend-exclude = [ "experiments/*/scripts", "experiments/*/mined" ]
 extend-include = [ "*.ipynb" ]
 format.docstring-code-format = true
 lint.select = [

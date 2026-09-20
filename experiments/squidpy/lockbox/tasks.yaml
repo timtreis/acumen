@@ -1,0 +1,584 @@
+tasks:
+- id: BinXBioLab-Data_Science_Capstone_Fall_2022-tangram-scripts-Tangram_BX__nuclei_max_spot
+  train:
+    prompt: |
+      Using the fluorescent brain tissue crop that ships with the package, along with its
+      matching spatial gene expression data, segment the cell nuclei visible in the image
+      and figure out how many nuclei fall within each spatial spot's tissue region. Report
+      the barcode of the spot that contains the most nuclei.
+    answer: AACTGGGTCCCGACGT-1
+  test:
+    prompt: |
+      Using the fluorescent brain tissue crop that ships with the package, segment the cell
+      nuclei visible in the image and count how many nuclei are detected across the entire
+      cropped tissue image as a whole (not restricted to any single spot). Report the total
+      nucleus count.
+    answer: '27468'
+- id: FreedomIntelligence-OpenClaw-Medical-Skills-skills-bio-workflows-spatial-pipeline-examples-visium_wo__svg_marker_mibitof
+  train:
+    prompt: |
+      Using the mibitof imaging dataset, restrict to the point16 tissue sample, build a
+      spatial neighbor graph over the cells, and test every measured protein marker for
+      spatial autocorrelation to find which single marker shows the strongest tendency to
+      form spatial clusters across the tissue rather than being randomly distributed. Report
+      just that marker's name.
+    answer: CK
+  test:
+    prompt: |
+      Using the mibitof imaging dataset, restrict to the point8 tissue sample, build a
+      spatial neighbor graph over the cells, and test every measured protein marker for
+      spatial autocorrelation to find which single marker shows the strongest tendency to
+      form spatial clusters across the tissue rather than being randomly distributed. Report
+      just that marker's name.
+    answer: CD45
+- id: FreedomIntelligence-OpenClaw-Medical-Skills-skills-spatial-transcriptomics-analysis-bioSkills-spatia__nhood_self_enrichment
+  train:
+    prompt: |
+      Using the mibitof data, determine which annotated cell type shows the strongest
+      tendency to be spatially surrounded by neighbors of its own type, rather than by
+      other cell types. Report only the name of that cell type exactly as it is
+      labeled in the data.
+    answer: Epithelial
+  test:
+    prompt: |
+      Using the imc data, determine which annotated cell type shows the strongest
+      tendency to be spatially surrounded by neighbors of its own type, rather than by
+      other cell types. Report only the name of that cell type exactly as it is
+      labeled in the data.
+    answer: basal CK tumor cell
+- id: HuangLab-PKU-PRISM-Analysis-HCC3Dpseudo-nhood_enrichment__nhood_most_segregated
+  train:
+    prompt: |
+      Using the imc dataset, determine which two cell types most strongly avoid each other
+      spatially in the tissue — the pair that ends up next to each other far less often than
+      random chance would predict. Report the two cell type names, in any order.
+    answer: apoptotic tumor cell, macrophages
+  test:
+    prompt: |
+      Using the merfish dataset, determine which two cell classes most strongly avoid each
+      other spatially in the tissue — the pair that ends up next to each other far less often
+      than random chance would predict. Report the two cell class names, in any order.
+    answer: Inhibitory, OD Mature 2
+- id: HuangLab-PKU-PRISM-Analysis-HCC3Dpseudo-nhood_enrichment__nhood_top_enriched
+  train:
+    prompt: |
+      Using the imc dataset, determine which two cell types are the strongest spatial
+      neighbors in the tissue — the pair that ends up next to each other far more often
+      than random chance would predict. Report the two cell type names, in any order.
+    answer: T cells, endothelial
+  test:
+    prompt: |
+      Using the mibitof dataset, determine which two cell types are the strongest spatial
+      neighbors in the tissue — the pair that ends up next to each other far more often
+      than random chance would predict. Report the two cell type names, in any order.
+    answer: Tcell_CD4, Tcell_CD8
+- id: JakobElkholtei-retinoblastoma-notebooks-01_exploration__spatial_neighbor_edges
+  train:
+    prompt: |
+      Using the visium_hne_adata spatial transcriptomics dataset (a Visium-profiled
+      mouse brain section, H&E stained), connect each tissue spot to its physically
+      closest neighboring spots on the slide to form a spatial neighbor graph. Report
+      the total number of neighbor connections (edges) present in the resulting graph.
+    answer: '15580'
+  test:
+    prompt: |
+      Using the visium_fluo_adata spatial transcriptomics dataset (a Visium-profiled
+      mouse brain section, fluorescence imaged), connect each tissue spot to its
+      physically closest neighboring spots on the slide to form a spatial neighbor
+      graph. Report the total number of neighbor connections (edges) present in the
+      resulting graph.
+    answer: '16328'
+- id: PKU-YuanGroup-OpenAI4S-skills-bioskills-bio-spatial-transcriptomics-image-analysis-scripts-extract_f__img_feature_top_spot
+  train:
+    prompt: |
+      Using the visium_hne example data (the paired tissue image and its spot-level
+      expression data), extract features that summarize the pixel intensity of the tissue
+      image under each spot, then find the single spot whose tissue-image patch has the
+      highest average pixel intensity overall. Report that spot's barcode/observation name
+      exactly as it appears in the data.
+    answer: ACGTACAGATTTCTCT-1
+  test:
+    prompt: |
+      Using the visium_fluo example data (the paired tissue image and its spot-level
+      expression data), extract features that summarize the pixel intensity of the tissue
+      image under each spot, then find the single spot whose tissue-image patch has the
+      highest average pixel intensity overall. Report that spot's barcode/observation name
+      exactly as it appears in the data.
+    answer: ATTAATGAACCAGTCG-1
+- id: PKU-YuanGroup-OpenAI4S-skills-bioskills-bio-workflows-spatial-pipeline-scripts-visium_workflow__top_svg_moran
+  train:
+    prompt: |
+      Using the visium_hne data, find the single gene whose expression pattern is
+      most strongly spatially autocorrelated across the tissue, i.e. the top
+      spatially variable gene ranked by Moran's I. Report only that gene's symbol.
+    answer: Nrgn
+  test:
+    prompt: |
+      Using the visium_fluo_adata_crop data, find the single gene whose expression
+      pattern is most strongly spatially autocorrelated across the tissue, i.e. the
+      top spatially variable gene ranked by Moran's I. Report only that gene's
+      symbol.
+    answer: Prkcd
+- id: Theo-Nelson-SMS-colab-2025-C4-SMSS_HW3__moran_top_gene
+  train:
+    prompt: |
+      Using the merfish data, restrict to the tissue section at Bregma coordinate -9.0
+      and find which gene shows the strongest spatial autocorrelation (its expression
+      forms the clearest spatial pattern rather than being randomly scattered across
+      cells). Report only the gene symbol.
+    answer: Nnat
+  test:
+    prompt: |
+      Using the merfish data, restrict to the tissue section at Bregma coordinate 26.0
+      and find which gene shows the strongest spatial autocorrelation (its expression
+      forms the clearest spatial pattern rather than being randomly scattered across
+      cells). Report only the gene symbol.
+    answer: Mbp
+- id: Yu-AnChen-dump-2023-02-orion-colon-spatial-analysis__nhood_enrichment_pair
+  train:
+    prompt: |
+      Using the imc data, build a spatial neighbor graph over the cells and test, for every
+      pair of annotated cell types, whether the two types tend to sit next to each other in
+      space more often than would be expected by chance. Find the one pair of two different
+      cell types with the strongest such positive spatial association. Report the two cell
+      type names as a comma-separated pair, in case-insensitive alphabetical order.
+    answer: endothelial, T cells
+  test:
+    prompt: |
+      Using the seqfish data, build a spatial neighbor graph over the cells and test, for
+      every pair of annotated cell types, whether the two types tend to sit next to each
+      other in space more often than would be expected by chance. Find the one pair of two
+      different cell types with the strongest such positive spatial association. Report the
+      two cell type names as a comma-separated pair, in case-insensitive alphabetical order.
+    answer: Intermediate mesoderm, Lateral plate mesoderm
+- id: abyssum-spatial-Nanostring-Nanostring_data__nhood_enrichment_pair
+  train:
+    prompt: |
+      Using the seqfish data, build a spatial neighbor graph among the cells and run a
+      permutation-based neighborhood enrichment test over the annotated cell type
+      clusters to see which cluster pairs tend to sit next to each other in the
+      tissue. Excluding a cluster paired with itself, report the two cluster names
+      that give the single highest enrichment score of any pair, separated by a
+      comma.
+    answer: Intermediate mesoderm, Lateral plate mesoderm
+  test:
+    prompt: |
+      Using the imc data, build a spatial neighbor graph among the cells and run a
+      permutation-based neighborhood enrichment test over the annotated cell type
+      clusters to see which cluster pairs tend to sit next to each other in the
+      tissue. Excluding a cluster paired with itself, report the two cluster names
+      that give the single highest enrichment score of any pair, separated by a
+      comma.
+    answer: T cells, endothelial
+- id: abyssum-spatial-Vizgen-Vizgen_data__merfish_moran_top_gene
+  train:
+    prompt: |
+      Using the merfish mouse hypothalamus data, restrict to the tissue section at
+      Bregma coordinate -29, build a spatial neighbor graph between segmented cells
+      and measure how strongly each gene's expression is spatially autocorrelated
+      across that graph. Report the symbol of the single gene with the strongest
+      spatial autocorrelation.
+    answer: Nnat
+  test:
+    prompt: |
+      Using the merfish mouse hypothalamus data, restrict to the tissue section at
+      Bregma coordinate 1, build a spatial neighbor graph between segmented cells
+      and measure how strongly each gene's expression is spatially autocorrelated
+      across that graph. Report the symbol of the single gene with the strongest
+      spatial autocorrelation.
+    answer: Cck
+- id: abyssum-spatial-slide_seqV2-slide_seqV2_data__moran_top_spatial_gene
+  train:
+    prompt: |
+      Using the slideseqv2 spatial dataset, build a spatial neighbor graph over the cells
+      and run a spatial autocorrelation analysis (Moran's I) across all genes to find
+      which genes show the strongest spatial patterning. Report the gene symbol with the
+      single highest autocorrelation score.
+    answer: Ttr
+  test:
+    prompt: |
+      Using the seqfish spatial dataset, build a spatial neighbor graph over the cells and
+      run a spatial autocorrelation analysis (Moran's I) across all genes to find which
+      genes show the strongest spatial patterning. Report the gene symbol with the single
+      highest autocorrelation score.
+    answer: Meox1
+- id: arundasan91-ScSTA_tutorial-scsta_pipeline_nb2_NSCLC__mibitof_centrality
+  train:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point8". Build the graph of which segmented cells sit
+      next to each other in space, then work out which annotated cell type
+      acts as the best-connected hub of that network -- the type most
+      heavily involved in direct cell-to-cell spatial adjacencies. Report
+      the exact cell type label.
+    answer: Myeloid_CD68
+  test:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point16". Build the graph of which segmented cells
+      sit next to each other in space, then work out which annotated cell
+      type acts as the best-connected hub of that network -- the type most
+      heavily involved in direct cell-to-cell spatial adjacencies. Report
+      the exact cell type label.
+    answer: Tcell_CD4
+- id: arundasan91-ScSTA_tutorial-scsta_pipeline_nb2_NSCLC__mibitof_colocalization
+  train:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point16". Test every pair of annotated cell types
+      for whether they sit next to each other spatially far more often than
+      random chance would predict, and find the single pair with the
+      strongest such enrichment. Report the two cell type labels that make
+      up that pair.
+    answer: Tcell_CD4, Tcell_CD8
+  test:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point23". Test every pair of annotated cell types
+      for whether they sit next to each other spatially far more often than
+      random chance would predict, and find the single pair with the
+      strongest such enrichment. Report the two cell type labels that make
+      up that pair.
+    answer: Endothelial, Imm_other
+- id: arundasan91-ScSTA_tutorial-scsta_pipeline_nb2_NSCLC__mibitof_ripley_clustering
+  train:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point8". Among the annotated cell types, work out
+      which one shows the strongest tendency to form spatially clustered
+      aggregates rather than being scattered randomly across the tissue.
+      Report the exact cell type label.
+    answer: Epithelial
+  test:
+    prompt: |
+      Using the mibitof spatial proteomics data, focus only on the imaging
+      region labelled "point23". Among the annotated cell types, work out
+      which one shows the strongest tendency to form spatially clustered
+      aggregates rather than being scattered randomly across the tissue.
+      Report the exact cell type label.
+    answer: Tcell_CD4
+- id: bdsc-tds-Norkin2026-workflow-analysis-xenium-2-coda__nhood_enrichment_top_pair
+  train:
+    prompt: |
+      Using the imc data, build a spatial neighborhood graph over the cells and test
+      whether pairs of cell types tend to sit next to each other more than expected by
+      chance. Excluding a cell type paired with itself, report the two distinct cell
+      types whose neighborhoods show the strongest mutual spatial enrichment.
+    answer: endothelial and T cells
+  test:
+    prompt: |
+      Using the seqfish data, build a spatial neighborhood graph over the cells and test
+      whether pairs of cell types tend to sit next to each other more than expected by
+      chance. Excluding a cell type paired with itself, report the two distinct cell
+      types whose neighborhoods show the strongest mutual spatial enrichment.
+    answer: Lateral plate mesoderm and Intermediate mesoderm
+- id: bozeklab-ecm_segmentation-ecm-connectivity_metrics__ecm_co_occurrence
+  train:
+    prompt: |
+      Using the imc dataset, examine how the probability of finding cells of each
+      annotated type near a cell changes as you look at increasingly larger distances
+      around it. Restricting to the very shortest distance range examined, find which
+      other cell type (not macrophages itself) has the highest co-occurrence probability
+      with the macrophages. Report just the name of that other cell type.
+    answer: vimentin hi stromal cell
+  test:
+    prompt: |
+      Using the imc dataset, examine how the probability of finding cells of each
+      annotated type near a cell changes as you look at increasingly larger distances
+      around it. Restricting to the very shortest distance range examined, find which
+      other cell type (not T cells itself) has the highest co-occurrence probability with
+      the T cells. Report just the name of that other cell type.
+    answer: endothelial
+- id: brain-discourse-Scanpy_scRNAseq_multiomics_2022_CSHL-spatial_basics-tissue-module-Squidpy_Visium__img_segmentation_object_density
+  train:
+    prompt: |
+      Using the visium_fluo_adata_crop dataset together with its matching tissue
+      image, segment the tissue image into individual objects and count how many
+      segmented objects fall within each spot's footprint. Determine which of the
+      annotated tissue-region clusters has the highest average object count per
+      spot, and report its exact cluster label as it appears in the data.
+    answer: Hypothalamus_1
+  test:
+    prompt: |
+      Using the visium_hne_adata_crop dataset together with its matching tissue
+      image, segment the tissue image into individual objects and count how many
+      segmented objects fall within each spot's footprint. Determine which of the
+      annotated tissue-region clusters has the highest average object count per
+      spot, and report its exact cluster label as it appears in the data.
+    answer: Cortex_3
+- id: ccb-hms-spatial-workshop-python-notebooks-nb4_spatial_statistics_with_squidpy__co_occurrence_top_partner
+  train:
+    prompt: |
+      Using the visium_hne spatial transcriptomics data and the tissue-region labels already
+      assigned to each spot, find the most abundant region by spot count, then determine which
+      other (different) region has the highest spatial co-occurrence score with it across the
+      distances tested. Report the name of that other region.
+    answer: Cortex_4
+  test:
+    prompt: |
+      Using the visium_fluo spatial transcriptomics data and the tissue-region labels already
+      assigned to each spot, find the most abundant region by spot count, then determine which
+      other (different) region has the highest spatial co-occurrence score with it across the
+      distances tested. Report the name of that other region.
+    answer: Cortex_3
+- id: csangara-thesis-Scripts-vignettes-.ipynb_checkpoints-squidpy_tutorial_visium_h-e-checkpoint__co-occurrence-neighbor
+  train:
+    prompt: |
+      Using the visium_hne data, focus on the tissue region labeled Hippocampus and
+      work out which other annotated region is most likely to be found in its
+      immediate spatial vicinity, considering only the very shortest distance range
+      from it. Report the name of that other region.
+    answer: Pyramidal_layer
+  test:
+    prompt: |
+      Using the imc data, focus on the endothelial cells and work out which other
+      annotated cell type is most likely to be found in their immediate spatial
+      vicinity, considering only the very shortest distance range from them. Report
+      the name of that other cell type.
+    answer: vimentin hi stromal cell
+- id: dkim195-HyDD2-Codes-5.-Xenium-Squidpy__centrality_top_celltype
+  train:
+    prompt: |
+      Using the imc data, determine which annotated cell type sits in the most central,
+      best-connected position within the tissue's cell-to-cell spatial arrangement.
+      Report only that cell type's name.
+    answer: apoptotic tumor cell
+  test:
+    prompt: |
+      Using the mibitof data, determine which annotated cell type sits in the most
+      central, best-connected position within the tissue's cell-to-cell spatial
+      arrangement. Report only that cell type's name.
+    answer: Tcell_CD4
+- id: elijahedmondson-Digital-Spatial-Profiling-squidpy_notebooks-master-examples-image-compute_features__image_features_brightest_region
+  train:
+    prompt: |
+      Using the visium_hne spatial dataset, which pairs per-spot gene expression with a
+      high-resolution tissue image, extract quantitative image-intensity features for the
+      tissue captured underneath each spot. Combine these with the anatomical-region
+      annotation already attached to the spots to work out which region has the highest
+      average image brightness across its spots. Report the name of that region exactly as
+      it is labeled in the data.
+    answer: Hippocampus
+  test:
+    prompt: |
+      Using the visium_fluo spatial dataset, which pairs per-spot gene expression with a
+      high-resolution tissue image, extract quantitative image-intensity features for the
+      tissue captured underneath each spot. Combine these with the anatomical-region
+      annotation already attached to the spots to work out which region has the highest
+      average image brightness across its spots. Report the name of that region exactly as
+      it is labeled in the data.
+    answer: Dentate_gyrus
+- id: emadulhaqq-Spacial-Transcriptomics-HnE-Visium__moran_top_gene
+  train:
+    prompt: |
+      Using the visium_hne data, find the single gene whose expression across the tissue is
+      organized into the clearest spatial pattern rather than being scattered at random from
+      spot to spot. Give only that gene's symbol.
+    answer: Nrgn
+  test:
+    prompt: |
+      Using the slideseqv2 data, find the single gene whose expression across the tissue is
+      organized into the clearest spatial pattern rather than being scattered at random from
+      spot to spot. Give only that gene's symbol.
+    answer: Ttr
+- id: estorrs-multiplex-imaging-pipeline-notebooks-batch_neighborhood_analysis_v1__co_occurrence_nearest
+  train:
+    prompt: |
+      Using the imc data, examine how the spatial co-occurrence of cell
+      types changes as you look at pairs of cells increasingly farther
+      apart, and determine which other cell type is most likely to be
+      found together with T cells at the very smallest distance scale
+      examined. Report only the name of that cell type.
+    answer: endothelial
+  test:
+    prompt: |
+      Using the imc data, examine how the spatial co-occurrence of cell
+      types changes as you look at pairs of cells increasingly farther
+      apart, and determine which other cell type is most likely to be
+      found together with endothelial cells at the very smallest distance
+      scale examined. Report only the name of that cell type.
+    answer: vimentin hi stromal cell
+- id: frankligy-exercise_codes-spatial-IMC__nhood_enrichment_partner
+  train:
+    prompt: |
+      Using the imc data, identify which cell type turns up as a direct spatial
+      neighbor of T cells far more often than would happen if cell positions in the
+      tissue were random — i.e. its strongest neighbor-enrichment partner. Report
+      only that cell type's name.
+    answer: endothelial
+  test:
+    prompt: |
+      Using the imc data, identify which cell type turns up as a direct spatial
+      neighbor of small elongated stromal cells far more often than would happen if
+      cell positions in the tissue were random — i.e. its strongest
+      neighbor-enrichment partner. Report only that cell type's name.
+    answer: macrophages
+- id: frankligy-exercise_codes-spatial-Slide-SeqV2__nhood_self_enrichment
+  train:
+    prompt: |
+      Using the slideseqv2 data, look at how the annotated cell type clusters are arranged
+      spatially and work out which single cluster's cells are most strongly enriched for
+      having their own neighbors be cells of that very same type, more so than any other
+      cluster shows for itself. Report only the name of that cluster.
+    answer: Ependymal
+  test:
+    prompt: |
+      Using the seqfish data, look at how the annotated cell type clusters are arranged
+      spatially and work out which single cluster's cells are most strongly enriched for
+      having their own neighbors be cells of that very same type, more so than any other
+      cluster shows for itself. Report only the name of that cluster.
+    answer: Cardiomyocytes
+- id: histocartography-spatial-omics-bench-from_to_annData__nhood_enrichment_pair
+  train:
+    prompt: |
+      Using the imc data, figure out which two cell types are found next to
+      each other in space far more often than would happen by random
+      chance — that is, the single pair of cell types with the strongest
+      positive spatial association. Report the names of both cell types in
+      that pair.
+    answer: endothelial and T cells
+  test:
+    prompt: |
+      Using the seqfish data, figure out which two cell types are found
+      next to each other in space far more often than would happen by
+      random chance — that is, the single pair of cell types with the
+      strongest positive spatial association. Report the names of both
+      cell types in that pair.
+    answer: Lateral plate mesoderm and Intermediate mesoderm
+- id: hubmapconsortium-user-templates-api-src-user_templates_api-templates-jupyter_lab-templates-squidpy-t__interaction_matrix_pair
+  train:
+    prompt: |
+      Using the slideseqv2 spatial transcriptomics data, build a spatial graph connecting
+      neighboring cells and count, for every pair of annotated cell types, how many times
+      cells of those two types end up as direct spatial neighbors. Looking only at the cell
+      type labeled "Microglia", find which other cell type it has the most such direct
+      neighbor contacts with (excluding itself). Report just the name of that other cell type,
+      exactly as it is written in the cell-type annotation.
+    answer: Astrocytes
+  test:
+    prompt: |
+      Using the slideseqv2 spatial transcriptomics data, build a spatial graph connecting
+      neighboring cells and count, for every pair of annotated cell types, how many times
+      cells of those two types end up as direct spatial neighbors. Looking only at the cell
+      type labeled "Neurogenesis", find which other cell type it has the most such direct
+      neighbor contacts with (excluding itself). Report just the name of that other cell type,
+      exactly as it is written in the cell-type annotation.
+    answer: DentatePyramids
+- id: linkangit-10x-Visium-HD-data-analysis-Visium_HD_code__visium_hne_cooccurrence_partner
+  train:
+    prompt: |
+      Using the visium_hne mouse brain spatial dataset, which already comes with a tissue-region
+      label for every spot, determine which other tissue region's spots are most enriched right
+      around Cortex_4 spots — i.e., at the shortest spatial distance considered, which other region
+      occurs near Cortex_4 far more often than that region's overall abundance would predict. Report
+      only the name of that other region.
+    answer: Cortex_5
+  test:
+    prompt: |
+      Using the visium_hne mouse brain spatial dataset, which already comes with a tissue-region
+      label for every spot, determine which other tissue region's spots are most enriched right
+      around Pyramidal_layer_dentate_gyrus spots — i.e., at the shortest spatial distance considered,
+      which other region occurs near Pyramidal_layer_dentate_gyrus far more often than that region's
+      overall abundance would predict. Report only the name of that other region.
+    answer: Hippocampus
+- id: saeyslab-spotless-benchmark-subworkflows-deconvolution-tangram-script_nf__img_segment_cell_count
+  train:
+    prompt: |
+      A colleague wants an estimate of cell density from the tissue image itself,
+      without relying on the paired expression counts, using the visium_hne_adata_crop
+      example data. Detect and segment the individual cells present in the tissue image
+      bundled with this dataset, then report the total number of distinct cells that
+      were identified in the image. Give the count as a single integer.
+    answer: '4438'
+  test:
+    prompt: |
+      A colleague wants an estimate of cell density from the tissue image itself,
+      without relying on the paired expression counts, using the visium_fluo_adata_crop
+      example data. Detect and segment the individual cells present in the tissue image
+      bundled with this dataset, then report the total number of distinct cells that
+      were identified in the image. Give the count as a single integer.
+    answer: '2744'
+- id: swaruplab-operon-protocols-spatial-transcriptomics-assets-spatial_template__spatial_co_occurrence
+  train:
+    prompt: |
+      Using the imc data and its labeled cell types, look at how the probability of finding
+      each cell type near a T cell changes with distance. Focusing on the shortest distance
+      range considered, and excluding T cells found near other T cells, report the name of
+      the cell type that is most likely to co-occur with T cells at that short range.
+    answer: endothelial
+  test:
+    prompt: |
+      Using the imc data and its labeled cell types, look at how the probability of finding
+      each cell type near a p53+ EGFR+ tumor cell changes with distance. Focusing on the
+      shortest distance range considered, and excluding p53+ EGFR+ tumor cells found near
+      other p53+ EGFR+ tumor cells, report the name of the cell type that is most likely to
+      co-occur with p53+ EGFR+ tumor cells at that short range.
+    answer: proliferative tumor cell
+- id: taimoorasad01-spatial-transcriptomics-10x-analysis-notebooks-03_visium_hne-mouse_brain_spatial_stati__moran_top_gene
+  train:
+    prompt: |
+      Using the visium_hne mouse brain spatial dataset, determine which
+      single gene's expression pattern is the most spatially structured
+      across the tissue (i.e. has the strongest spatial autocorrelation).
+      Report only that gene's symbol.
+    answer: Nrgn
+  test:
+    prompt: |
+      Using the seqfish spatial dataset, determine which single gene's
+      expression pattern is the most spatially structured across the tissue
+      (i.e. has the strongest spatial autocorrelation). Report only that
+      gene's symbol.
+    answer: Meox1
+- id: taimoorasad01-spatial-transcriptomics-10x-analysis-notebooks-03_visium_hne-mouse_brain_spatial_stati__nhood_enrichment
+  train:
+    prompt: |
+      Using the visium_hne mouse brain spatial dataset, work out which tissue
+      region's spots turn up right next to the Hippocampus region's spots far
+      more often than random chance would predict. Report just the name of
+      that one most spatially associated region.
+    answer: Pyramidal_layer
+  test:
+    prompt: |
+      Using the visium_fluo mouse brain spatial dataset, work out which
+      tissue region's spots turn up right next to the Dentate_gyrus region's
+      spots far more often than random chance would predict. Report just the
+      name of that one most spatially associated region.
+    answer: Hippocampus
+- id: theislab-scanpy_squidpy_demo_2021-tutorial_visium_hne__ligrec_top_pair
+  train:
+    prompt: |
+      Using the visium_hne mouse brain spatial transcriptomics data, the tissue spots are
+      already annotated into named regions. Treating the Striatum region as the signal
+      source and the Lateral_ventricle region as the receiving side, work out which single
+      ligand-receptor gene pair shows the strongest evidence of being used for signaling
+      between them (i.e. it has the most significant and strongest signal of the two genes
+      being co-expressed on the sending and receiving sides). Report the pair as
+      "LIGAND-RECEPTOR" using the gene symbols, ligand first.
+    answer: IL1B-PTGDS
+  test:
+    prompt: |
+      Using the visium_hne mouse brain spatial transcriptomics data, the tissue spots are
+      already annotated into named regions. Treating the Hippocampus region as the signal
+      source and the Fiber_tract region as the receiving side, work out which single
+      ligand-receptor gene pair shows the strongest evidence of being used for signaling
+      between them (i.e. it has the most significant and strongest signal of the two genes
+      being co-expressed on the sending and receiving sides). Report the pair as
+      "LIGAND-RECEPTOR" using the gene symbols, ligand first.
+    answer: CNTN4-APLP1
+- id: xX-its-amit-Xx-spatial-sarc-atlas-notebooks-05_niche_identification__nhood_enrichment_partner
+  train:
+    prompt: |
+      Using the imc data, I want to know whether macrophages tend to sit right next to
+      particular other cell types more often than random chance would predict, or avoid
+      them. Test every pair of cell types for this kind of non-random spatial
+      co-localization and find the one other cell type that is macrophages' single
+      strongest positive partner. Report just the name of that other cell type.
+    answer: T cells
+  test:
+    prompt: |
+      Using the seqfish data, I want to know whether cells annotated as Endothelium tend to
+      sit right next to particular other cell types more often than random chance would
+      predict, or avoid them. Test every pair of cell types for this kind of non-random
+      spatial co-localization and find the one other cell type that is Endothelium's
+      single strongest positive partner. Report just the name of that other cell type.
+    answer: Haematoendothelial progenitors
