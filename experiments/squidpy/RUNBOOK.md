@@ -144,10 +144,14 @@ been run live.
 acumen evolve --config config.yaml --tasks tasks_pool.yaml \
   --rulebooks rulebooks --skills skills --runs runs_evolve \
   --islands 3 --generations 40 --headroom \
-  --screen-size 24 --accept-delta <from stage 2> --confirm-every 3 \
+  --screen-size 24 --screen-drafts 3 --accept-delta <from stage 2> --confirm-every 3 \
   --no-lockbox --auth api --log-dir logs_evolve
 ```
 
+- `--screen-drafts 3` is the flag this experiment's own findings paid for: each candidate is
+  drafted three times and judged on the sum, so a generation is accepted for signal rather than
+  draft luck. `--accept-delta` still means *passes per draft*; the bar scales automatically. This
+  triples the drafting cost per generation and is the single best use of a large budget here.
 - `--islands 3` evolves three rulebooks independently on disjoint task partitions, then
   cross-pollinates: only edits that replicated across ≥2 islands survive the merge. Replication
   across islands is the evidence standard — it is what makes a rule a *finding* rather than a fit.
@@ -162,12 +166,9 @@ acumen evolve --config config.yaml --tasks tasks_pool.yaml \
 `runs_evolve/evolve.jsonl` is one line per generation — directive, screen subset, scores, decision.
 That file is the dataset behind any claim about *what kind of edits* help, so keep it.
 
-**Known limit, and the one place we would spend your compute if you have it to burn:** screens and
-confirmations inside `evolve` score a candidate through a *single* draft, so selection is exposed
-to the same ±8pp draft noise as everything else. `--accept-delta` is the blunt guard against it.
-Averaging each candidate over N drafts at the screen step would remove the confound properly; it
-is not implemented. If you have the budget, say so and we will build it — it is the experiment's
-own conclusion turned into code.
+**Sanity check before the long run.** Start with `--generations 2 --islands 1` and confirm the
+journal shows two generations with screens summed over three drafts (`total` = screen size x 3).
+Then relaunch with the real budget; resume reuses everything already on disk.
 
 ## Stage 4 — the verdict, once
 

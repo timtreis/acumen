@@ -800,6 +800,7 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
                 k=args.islands,
                 generations=args.generations,
                 screen_size=args.screen_size,
+                screen_drafts=args.screen_drafts,
                 epoch_len=args.epoch_len,
                 accept_delta=args.accept_delta,
                 confirm_every=args.confirm_every,
@@ -848,6 +849,7 @@ def _cmd_evolve(args: argparse.Namespace) -> int:
             tasks=tasks,
             generations=args.generations,
             screen_size=args.screen_size,
+            screen_drafts=args.screen_drafts,
             epoch_len=args.epoch_len,
             accept_delta=args.accept_delta,
             confirm_every=args.confirm_every,
@@ -1401,6 +1403,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evolve.add_argument(
         "--screen-size", type=int, default=12, help="tasks per screen subset (cheap, noisy tier; default 12)"
+    )
+    evolve.add_argument(
+        "--screen-drafts",
+        type=int,
+        default=1,
+        help="score each version on the screen over N independent drafts (default 1). Drafting is "
+        "the noisiest step — the same rulebook drafted twice differs by ~8pp — and that noise is a "
+        "per-skill offset more screen tasks cannot average away. The accept bar scales with N, so "
+        "--accept-delta keeps meaning passes per draft",
     )
     evolve.add_argument(
         "--epoch-len", type=int, default=5, help="generations before the screen subset rotates (default 5)"

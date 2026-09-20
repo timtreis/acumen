@@ -105,8 +105,13 @@ def _install_fakes(
 
     async def fake_run_matrix(planned, *, runs_root, **_):
         calls["bench"] += 1
+        # Extra drafts each live in their own skills-root holding a single v1, so their arm is
+        # always "skill_v1". The run tree is what says which version they are a draft OF:
+        # runs/drafts/<version>/d<i>. Real drafts share the rulebook, so they share its behaviour.
+        parts = Path(runs_root).parts
+        variant = parts[parts.index("drafts") + 1] if "drafts" in parts else None
         for item in planned:
-            version = item.key.arm.removeprefix("skill_")
+            version = variant or item.key.arm.removeprefix("skill_")
             ok = item.key.split == "train" or item.key.task_id in passes.get(version, set())
             d = run_dir(runs_root, item.key)
             d.mkdir(parents=True, exist_ok=True)
@@ -420,3 +425,109 @@ def test_archipelago_evolves_islands_pollinates_validates_and_resumes(
 
     with pytest.raises(LoopError, match="k >= 2"):
         asyncio.run(run_archipelago(**{**kw, "k": 1}))
+
+
+def test_screen_drafts_scores_each_version_over_n_drafts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With --screen-drafts N a version is drafted N times, benched in N trees, and judged on the sum.
+
+    The accept bar scales with N, so ``accept_delta`` keeps meaning passes *per draft*: v2 passes
+    everything and v1 nothing, so the summed gap is 4 * N against a bar of 2 * N.
+    """
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    ids = [f"t{i}" for i in range(4)]
+    passes = {"v1": set(), "v2": set(ids)}
+    _install_fakes(monkeypatch, cfg, calls, [], passes)
+
+    run = _evolve(
+        tmp_path,
+        cfg,
+        [_task(t) for t in ids],
+        generations=1,
+        screen_size=4,
+        screen_drafts=3,
+        accept_delta=2,
+        confirm_every=1,
+        allow_no_lockbox=True,
+        evaluate_lockbox=False,
+    )
+
+    gen = run.generations[0]
+    # Summed over 3 drafts of a 4-task screen: the champion 0/12, the candidate 12/12.
+    assert (gen.champion_screen.passed, gen.champion_screen.total) == (0, 12)
+    assert (gen.candidate_screen.passed, gen.candidate_screen.total) == (12, 12)
+    assert gen.accepted
+
+    # Draft 1 stays the primary tree; drafts 2..N get their own, so no arm collides.
+    for version in ("v1", "v2"):
+        assert (tmp_path / "skills" / version / "SKILL.md").is_file()
+        for i in (2, 3):
+            assert (tmp_path / "skills" / "drafts" / version / f"d{i}" / "v1" / "SKILL.md").is_file()
+            assert (tmp_path / "runs" / "drafts" / version / f"d{i}").is_dir()
+
+
+def test_screen_drafts_bar_rejects_a_win_that_only_one_draft_saw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A candidate that beats the champion by the bar on ONE draft fails once N drafts are summed.
+
+    This is the whole point: at ``screen_drafts=1`` a +2 win is indistinguishable from draft luck.
+    Here the candidate gains 2 tasks per draft against a bar of 3 per draft, and is rejected.
+    """
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    ids = [f"t{i}" for i in range(4)]
+    passes = {"v1": {"t0"}, "v2": {"t0", "t1", "t2"}}
+    _install_fakes(monkeypatch, cfg, calls, [], passes)
+
+    run = _evolve(
+        tmp_path,
+        cfg,
+        [_task(t) for t in ids],
+        generations=1,
+        screen_size=4,
+        screen_drafts=2,
+        accept_delta=3,
+        confirm_every=1,
+        allow_no_lockbox=True,
+        evaluate_lockbox=False,
+    )
+
+    gen = run.generations[0]
+    assert gen.candidate_screen.passed - gen.champion_screen.passed == 4  # 2 per draft, 2 drafts
+    assert not gen.accepted  # the bar is 3 * 2 = 6
+    assert run.champion == "v1"
+
+
+def test_screen_drafts_resume_adds_only_the_missing_drafts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-running at the same N spawns no agents; the run is replayed from disk."""
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    calls = {"draft": 0, "bench": 0, "improve": 0}
+    ids = [f"t{i}" for i in range(4)]
+    passes = {"v1": set(), "v2": set(ids)}
+    _install_fakes(monkeypatch, cfg, calls, [], passes)
+    kw = {
+        "generations": 1,
+        "screen_size": 4,
+        "screen_drafts": 2,
+        "accept_delta": 2,
+        "confirm_every": 1,
+        "allow_no_lockbox": True,
+        "evaluate_lockbox": False,
+    }
+    first = _evolve(tmp_path, cfg, [_task(t) for t in ids], **kw)
+    drafted, improved = calls["draft"], calls["improve"]
+    assert drafted > 0
+
+    second = _evolve(tmp_path, cfg, [_task(t) for t in ids], **kw)
+
+    assert calls["draft"] == drafted and calls["improve"] == improved  # no agent ran again
+    assert second.champion == first.champion
+    assert second.generations[0].candidate_screen.passed == first.generations[0].candidate_screen.passed
+
+
+def test_screen_drafts_must_be_positive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = Config(repo="/pkg", skill_name="pkg", models=[MODEL], n_replicates=1, max_concurrency=2)
+    _install_fakes(monkeypatch, cfg, {"draft": 0, "bench": 0, "improve": 0}, [], {"v1": set()})
+    with pytest.raises(LoopError, match="screen_drafts must be >= 1"):
+        _evolve(tmp_path, cfg, [_task("t0")], generations=1, screen_drafts=0, allow_no_lockbox=True)

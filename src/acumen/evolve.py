@@ -59,7 +59,9 @@ from acumen.loop import (
     _bench,
     _ensure_rulebook,
     _ensure_skill,
+    _ensure_skill_variants,
     _lockbox_eval,
+    draft_variant_root,
     score,
 )
 from acumen.paths import SPLITS
@@ -209,6 +211,7 @@ async def run_evolve(
     tasks: Sequence[Task],
     generations: int = 20,
     screen_size: int = 12,
+    screen_drafts: int = 1,
     epoch_len: int = 5,
     accept_delta: int = 2,
     confirm_every: int = 5,
@@ -246,9 +249,13 @@ async def run_evolve(
        anything else reverts the screen champion to the confirmed one. Pending accepts are
        confirmed the same way once the generation budget or wall-clock stops the run.
 
-    ``accept_delta`` exists because the screen is noisy by construction (12-ish tasks, one draft):
-    it should be set from measured draft variance, not hope — a screen win smaller than the noise
-    floor must not even challenge.
+    ``accept_delta`` exists because the screen is noisy by construction (12-ish tasks): it should be
+    set from measured draft variance, not hope — a screen win smaller than the noise
+    floor must not even challenge. ``screen_drafts`` attacks that noise at its source: every score
+    above is summed over that many independent drafts of the version, and the accept bar scales
+    with it, so ``accept_delta`` keeps meaning "passes per draft" while the noise around it shrinks.
+    Draft noise does not shrink with more screen tasks — it is a per-skill offset — so this is the
+    only lever that removes it rather than damping it.
 
     With ``evaluate_lockbox`` (and a lockbox): the seed and the final champion are scored on the
     lockbox over ``n_drafts`` independent drafts each — the run's one honest number. Pass
@@ -271,6 +278,8 @@ async def run_evolve(
         raise LoopError(f"epoch_len must be >= 1, got {epoch_len}")
     if n_drafts < 1:
         raise LoopError(f"n_drafts must be >= 1, got {n_drafts}")
+    if screen_drafts < 1:
+        raise LoopError(f"screen_drafts must be >= 1, got {screen_drafts}")
 
     started = clock()
     concurrency = max_concurrency or cfg.max_concurrency
@@ -331,23 +340,55 @@ async def run_evolve(
         )
 
     async def bench_on(version: str, task_ids: Sequence[str] | None, splits: Sequence[str]) -> Score:
-        skill, cost = await ensure(version)
-        planned = await _bench(
+        """Score ``version`` on a slice, **summed over ``screen_drafts`` independent drafts**.
+
+        Drafting is the noisiest step in the pipeline: the same rulebook text drafted twice differs
+        by ~8pp of pass rate (measured), which is the size of the effects selection is trying to
+        see. That noise is a per-skill offset, so a bigger screen does not shrink it — only more
+        drafts do. Summing rather than averaging keeps the arithmetic integral; the accept bar is
+        scaled by the same factor, so ``accept_delta`` keeps meaning "passes per draft".
+
+        Draft 1 is the primary ``skills/<version>`` benched into ``runs_root`` — so the improve
+        agent's evidence and every existing run tree are exactly where they were at
+        ``screen_drafts=1``. Drafts 2..N get their own skills and runs roots, so no arm collides
+        and a rerun with a larger N only adds the missing drafts.
+        """
+        skills, cost = await _ensure_skill_variants(
             cfg=cfg,
             target=target,
-            skill=skill,
-            tasks=tasks,
-            runs_root=runs_root,
-            splits=list(splits),
+            skills_root=skills_root,
+            rulebooks_root=rulebooks_root,
+            version=version,
+            n=screen_drafts,
             auth_mode=auth_mode,
-            task_ids=list(task_ids) if task_ids is not None else None,
-            max_concurrency=concurrency,
-            on_start=on_bench_start,
-            on_done=on_bench_done,
+            log_dir=log_dir,
+            stream=stream,
         )
         nonlocal total_cost
         total_cost += cost
-        return score(runs_root, [p for p in planned if p.key.split == "test"])
+        totals = Score(passed=0, total=0, loaded=0)
+        for i, skill in enumerate(skills, start=1):
+            dest = runs_root if i == 1 else draft_variant_root(runs_root, version, i)
+            planned = await _bench(
+                cfg=cfg,
+                target=target,
+                skill=skill,
+                tasks=tasks,
+                runs_root=dest,
+                splits=list(splits),
+                auth_mode=auth_mode,
+                task_ids=list(task_ids) if task_ids is not None else None,
+                max_concurrency=concurrency,
+                on_start=on_bench_start,
+                on_done=on_bench_done,
+            )
+            part = score(dest, [p for p in planned if p.key.split == "test"])
+            totals = Score(
+                passed=totals.passed + part.passed,
+                total=totals.total + part.total,
+                loaded=totals.loaded + part.loaded,
+            )
+        return totals
 
     async def confirm(challenger: str, incumbent: str) -> bool:
         """Full-bench the challenger and incumbent; True promotes the challenger."""
@@ -394,7 +435,7 @@ async def run_evolve(
 
         # 3. Screen the candidate on the identical subset; accept only past the noise floor.
         candidate_screen = await bench_on(candidate_version, subset, ["test"])
-        accepted = candidate_screen.passed - champion_screen.passed >= accept_delta
+        accepted = candidate_screen.passed - champion_screen.passed >= accept_delta * screen_drafts
         if accepted:
             champion = candidate_version
             accepts_since_confirm += 1
@@ -710,6 +751,7 @@ async def run_archipelago(
     k: int = 3,
     generations: int = 10,
     screen_size: int = 12,
+    screen_drafts: int = 1,
     epoch_len: int = 5,
     accept_delta: int = 2,
     confirm_every: int = 5,
@@ -811,6 +853,7 @@ async def run_archipelago(
             tasks=[by_id[t] for t in pool],
             generations=generations,
             screen_size=screen_size,
+            screen_drafts=screen_drafts,
             epoch_len=epoch_len,
             accept_delta=accept_delta,
             confirm_every=confirm_every,
