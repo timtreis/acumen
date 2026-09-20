@@ -33,6 +33,29 @@ You decide when to stop. Every version is benchmarked on both splits, and only t
 reach the improver — so a widening train/test gap is a visible sign a skill is overfitting
 rather than genuinely helping.
 
+## Beyond the manual loop
+
+The loop above is hand-driven: you decide each step. These commands measure and automate it, and are
+what `acumen loop` and `acumen evolve` drive:
+
+- **`acumen mine`** — harvest real analyses from the package's own notebooks and tutorials into task
+  candidates; `acumen tasks --candidates` turns them into tasks with executable ground-truth scripts.
+- **`acumen coverage`** — how much of the package's public API the tasks actually verify, and which
+  symbols a skill teaches that nothing checks.
+- **`acumen warm`** — pre-fetch every dataset the tasks need, so a benchmark pass doesn't pay for
+  downloads.
+- **`acumen screen`** — a cheap subset benchmark, for accept/reject decisions between full passes.
+- **`acumen lockbox`** — carve a write-once, digest-verified hold-out set the optimizer never sees.
+- **`acumen loop`** — the whole draft/bench/improve cycle unattended, with stopping rules, k-fold
+  cross-validated version picking (`--cv K`), scoring over N independent drafts (`--drafts N`), and
+  one lockbox verdict at the end.
+- **`acumen evolve`** — generational optimization: improve always from the current best version,
+  rotating exploration directives, a cheap screen per generation and a full-benchmark ratchet that
+  reverts a champion which fails confirmation. `--islands K` evolves k rulebooks independently on
+  disjoint task partitions, then keeps only the edits that replicated across islands.
+
+Long runs pause cleanly on a session limit (exit code 3) and resume from disk when rerun.
+
 ## Quickstart
 
 ```bash
