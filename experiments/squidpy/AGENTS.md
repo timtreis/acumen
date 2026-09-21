@@ -10,7 +10,7 @@ was selected on? Report it with `analyze.py`, whatever it says. A clean negative
 
 ## Setup
 
-Needs git, [uv](https://docs.astral.sh/uv/), Python ≥3.12, network, ~10 GB disk, and an Anthropic API
+Needs git, [uv](https://docs.astral.sh/uv/), Python ≥3.12, network, ~20 GB disk (the squidpy checkout, its venv and datasets alone are ~12 GB), and an Anthropic API
 key with a high rate limit. macOS or Linux.
 
 ```bash
