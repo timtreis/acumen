@@ -212,10 +212,14 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         skill = load_skill(args.skills, version, expect_name=cfg.skill_name)
 
     planned = build_matrix(cfg, tasks, skill=version, splits=args.split or SPLITS, task_ids=args.task)
-    todo = pending(planned, args.runs, resume=not args.no_resume)
+    skill_hash = skill.hash if skill is not None else None
+    todo = pending(planned, args.runs, skill_hash=skill_hash, resume=not args.no_resume)
+    stale = len(todo) - len(pending(planned, args.runs, skill_hash=None, resume=not args.no_resume))
 
     arm = "noskill" if version is None else f"skill_{version}"
     print(f"arm {arm}: {len(planned)} runs planned, {len(planned) - len(todo)} already complete, {len(todo)} to run")
+    if stale:
+        print(f"  {stale} of those were recorded by a different {version} draft — re-running, not reusing them")
     if skill is not None:
         print(f"skill {skill.version}: {skill.name} ({skill.hash[:19]}…)")
     if args.dry_run:

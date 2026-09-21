@@ -152,9 +152,9 @@ acumen evolve --config config.yaml --tasks tasks_pool.yaml \
 ```
 
 Check `runs_sanity/evolve.jsonl` has two lines whose screen `total` is 36 (12 tasks x 3 drafts),
-then delete every `*_sanity` tree. **Never point a second run at an existing `--runs` tree:** results
-are resumed by path, not by skill, so a run that finds `runs/skill_v1/` already populated reuses
-those results even if they came from a different draft.
+then delete every `*_sanity` tree. **Never point a second run at an existing `--runs` tree.** A
+result recorded by a different draft is re-run rather than reused, but the second run's generation
+journal and version numbers still land on top of the first's.
 
 **Then the real run.** It evolves, merges the islands, validates the merge on the full working
 pool, and only then opens `lockbox2` — once — scoring the seed and the merged champion over 3

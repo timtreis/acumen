@@ -356,6 +356,11 @@ async def run_once(
             f"arm {key.arm!r} expects skill {key.skill!r} but was given {skill.version if skill else None!r}"
         )
     run_dir.mkdir(parents=True, exist_ok=True)
+    # A re-run (a stale draft's result, --no-resume) must not inherit the previous run's artifacts:
+    # grading reads answer.md and skill-loading reads the transcript, and both are only rewritten
+    # if this run gets far enough to produce them.
+    for name in (RESULT_FILE, ANSWER_FILE, SCRIPT_FILE, TRANSCRIPT_JSONL, TRANSCRIPT_HTML):
+        (run_dir / name).unlink(missing_ok=True)
     split = task.split(key.split)
 
     result: ResultMessage | None = None

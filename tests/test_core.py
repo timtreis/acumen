@@ -6,6 +6,7 @@ broke, not an exhaustive sweep of each validator.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -37,7 +39,18 @@ from acumen.env import (
 )
 from acumen.grade import grade_answer, grade_run
 from acumen.improve import _write_material, collect_train_runs, load_rates
-from acumen.paths import RunKey, arm_name, is_complete, parse_run_dir, run_dir
+from acumen.paths import (
+    ANSWER_FILE,
+    RESULT_FILE,
+    SCRIPT_FILE,
+    TRANSCRIPT_HTML,
+    TRANSCRIPT_JSONL,
+    RunKey,
+    arm_name,
+    is_complete,
+    parse_run_dir,
+    run_dir,
+)
 from acumen.procs import label_env, reap, supported, survivors
 from acumen.prompts import draft_prompt, feedback_block, improve_prompt
 from acumen.report import (
@@ -62,7 +75,7 @@ from acumen.report import (
 from acumen.runner import StderrFilter, _skill_fired, find_background_use
 from acumen.ship import _ship_env
 from acumen.skills import SkillError, load_skill, read_meta, skill_hash, write_meta
-from acumen.tasks import TaskError, load_tasks, parse_tasks
+from acumen.tasks import Task, TaskError, TaskSplit, load_tasks, parse_tasks
 
 # --- grading ---------------------------------------------------------------------------
 
@@ -235,8 +248,8 @@ def test_build_matrix_and_resume(project: Path, model: str, make_result) -> None
 
     runs = project / "runs"
     make_result(runs, RunKey(arm="skill_v1", split="train", model=model, task_id="example_task", rep=1))
-    assert [p.key.split for p in pending(planned, runs)] == ["test"]
-    assert len(pending(planned, runs, resume=False)) == 2
+    assert [p.key.split for p in pending(planned, runs, skill_hash=None)] == ["test"]
+    assert len(pending(planned, runs, skill_hash=None, resume=False)) == 2
 
 
 def test_skill_fired_matches_the_skill_under_test_only(tmp_path: Path) -> None:
@@ -1335,3 +1348,65 @@ def test_scrubbed_env_keeps_long_bash_commands_inline(tmp_path: Path) -> None:
     env = scrubbed_env(config_dir=tmp_path / "cfg", home=tmp_path / "home")
     assert env["BASH_DEFAULT_TIMEOUT_MS"] == str(BASH_TIMEOUT_MS) == env["BASH_MAX_TIMEOUT_MS"]
     assert BASH_TIMEOUT_MS >= 30 * 60 * 1000
+
+
+def test_resume_reruns_a_skill_run_recorded_by_a_different_draft(project: Path, model: str, make_result) -> None:
+    """Resume is by path, and the path names a version, not a draft — so the hash has to decide.
+
+    A tree whose skill_v1/ holds another v1 draft's results (a re-drafted skill, a sanity run that
+    shared the tree) must re-run them, not score this draft with that draft's evidence.
+    """
+    cfg = load_config(project / "config.yaml")
+    tasks = load_tasks(project / "tasks.yaml")
+    planned = build_matrix(cfg, tasks, skill="v1", splits=["test"])
+    runs = project / "runs"
+    key = planned[0].key
+    make_result(runs, key)
+    result = run_dir(runs, key) / RESULT_FILE
+
+    def record(skill_hash) -> None:
+        payload = json.loads(result.read_text())
+        payload["skill_hash"] = skill_hash
+        result.write_text(json.dumps(payload))
+
+    record("sha256:this-draft")
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == []  # same skill: reused
+    assert pending(planned, runs, skill_hash="sha256:other-draft") == planned  # different draft: re-run
+
+    record(None)  # a result from before hashes were recorded cannot vouch for any skill
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == planned
+
+    result.write_text("{not json")  # unreadable: re-run rather than trust it
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == planned
+    assert pending(planned, runs, skill_hash=None) == []  # no-skill arm: presence is enough
+
+
+def test_a_rerun_starts_without_the_previous_runs_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grading reads answer.md and load detection reads the transcript; a re-run that dies before
+    rewriting them must not be graded on the previous draft's answer."""
+    from acumen import runner as runner_mod
+
+    directory = tmp_path / "rep_1"
+    directory.mkdir()
+    stale = [RESULT_FILE, ANSWER_FILE, SCRIPT_FILE, TRANSCRIPT_JSONL, TRANSCRIPT_HTML]
+    for name in stale:
+        (directory / name).write_text("from the previous draft")
+
+    def dead_sandbox(*_, **__):
+        raise RuntimeError("sandbox never opened")
+
+    monkeypatch.setattr(runner_mod, "sandbox", dead_sandbox)
+    split = TaskSplit(prompt="p", answer="42")
+    with pytest.raises(RuntimeError, match="sandbox never opened"):
+        asyncio.run(
+            runner_mod.run_once(
+                key=RunKey(arm="noskill", split="test", model="m", task_id="t", rep=1),
+                task=Task(id="t", train=split, test=split),
+                target=SimpleNamespace(),
+                run_dir=directory,
+                model="m",
+                max_turns=1,
+                max_usd=1.0,
+            )
+        )
+    assert [name for name in stale if (directory / name).exists()] == []

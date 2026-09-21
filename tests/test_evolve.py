@@ -103,7 +103,7 @@ def _install_fakes(
         _write_skill(skills_root, version, cfg.skill_name)
         return SimpleNamespace(skill=load_skill(skills_root, version, expect_name=cfg.skill_name), cost_usd=0.1)
 
-    async def fake_run_matrix(planned, *, runs_root, **_):
+    async def fake_run_matrix(planned, *, runs_root, skill=None, **_):
         calls["bench"] += 1
         # Extra drafts each live in their own skills-root holding a single v1, so their arm is
         # always "skill_v1". The run tree is what says which version they are a draft OF:
@@ -115,7 +115,8 @@ def _install_fakes(
             ok = item.key.split == "train" or item.key.task_id in passes.get(version, set())
             d = run_dir(runs_root, item.key)
             d.mkdir(parents=True, exist_ok=True)
-            (d / RESULT_FILE).write_text(json.dumps({"success": ok, "skill_loaded": True}))
+            payload = {"success": ok, "skill_loaded": True, "skill_hash": skill.hash if skill else None}
+            (d / RESULT_FILE).write_text(json.dumps(payload))
         return []
 
     async def fake_improve(*, rulebooks_root, parent_version, tasks, feedback=None, deny_dirs=(), **_):

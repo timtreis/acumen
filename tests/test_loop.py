@@ -90,12 +90,13 @@ def _planned(arm: str, split: str, task_id: str, rep: int = 1) -> PlannedRun:
     return PlannedRun(key=key, task=_task(task_id), model=MODEL, max_turns=1, max_usd=1.0)
 
 
-def _write_result(runs_root: Path, planned: PlannedRun, *, success: bool, loaded: bool = True) -> None:
+def _write_result(runs_root: Path, planned: PlannedRun, *, success: bool, loaded: bool = True, skill=None) -> None:
+    """A result.json as the runner writes it — including the hash resume checks it against."""
     directory = run_dir(runs_root, planned.key)
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / RESULT_FILE).write_text(
-        json.dumps({"success": success, "skill_loaded": loaded, "model": MODEL, "answer": "x", "reason": "ok"})
-    )
+    payload = {"success": success, "skill_loaded": loaded, "model": MODEL, "answer": "x", "reason": "ok"}
+    payload["skill_hash"] = skill.hash if skill is not None else None
+    (directory / RESULT_FILE).write_text(json.dumps(payload))
 
 
 def test_score_counts_passes_and_loads_over_complete_runs(tmp_path: Path) -> None:
@@ -152,10 +153,10 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, cfg: Config, success_by_arm_
         skill = load_skill(skills_root, version, expect_name=cfg.skill_name)
         return SimpleNamespace(skill=skill, cost_usd=0.1)
 
-    async def fake_run_matrix(planned, *, runs_root, **_):
+    async def fake_run_matrix(planned, *, runs_root, skill=None, **_):
         calls["bench"] += 1
         for item in planned:
-            _write_result(runs_root, item, success=success_by_arm_split[(item.key.arm, item.key.split)])
+            _write_result(runs_root, item, success=success_by_arm_split[(item.key.arm, item.key.split)], skill=skill)
         return []
 
     async def fake_improve(*, rulebooks_root, parent_version, **_):
@@ -311,12 +312,12 @@ def _install_cv_fakes(monkeypatch: pytest.MonkeyPatch, cfg: Config, calls: dict,
         _write_skill(skills_root, version, cfg.skill_name)
         return SimpleNamespace(skill=load_skill(skills_root, version, expect_name=cfg.skill_name), cost_usd=0.1)
 
-    async def fake_run_matrix(planned, *, runs_root, **_):
+    async def fake_run_matrix(planned, *, runs_root, skill=None, **_):
         calls["bench"] += 1
         for item in planned:
             # Main tree: parent skill passes train, fails test. CV trees: fold skills pass.
             in_cv = loop_mod.CV_DIRNAME in runs_root.parts
-            _write_result(runs_root, item, success=in_cv or item.key.split == "train")
+            _write_result(runs_root, item, success=in_cv or item.key.split == "train", skill=skill)
         return []
 
     async def fake_improve(*, rulebooks_root, parent_version, tasks, held_out_ids=(), deny_dirs=(), **_):

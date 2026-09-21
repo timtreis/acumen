@@ -198,7 +198,7 @@ async def _bench(
     outcomes ``run_matrix`` hands back.
     """
     planned = build_matrix(cfg, tasks, skill=skill.version, splits=splits, task_ids=task_ids)
-    todo = pending(planned, runs_root, resume=True)
+    todo = pending(planned, runs_root, skill_hash=skill.hash)
     if todo:
         await run_matrix(
             todo,

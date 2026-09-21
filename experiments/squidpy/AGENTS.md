@@ -29,9 +29,9 @@ Every command below runs from `~/squidpy-exp` with that venv active and `--auth 
 1. **Never look at `lockbox2/` early.** No `bench` on `lockbox2/tasks.yaml` and no
    `--lockbox lockbox2` on any run except the final evolve run. Each look spends its independence.
 2. **Never edit a hold-out.** `lockbox/` and `lockbox2/` are write-once and digest-verified.
-3. **Never change a flag on a resumed run.** Resume is by path: rerunning the identical command
-   continues it; a changed command measures something else on top of old results. Start fresh
-   `--runs/--skills/--rulebooks` trees instead.
+3. **Never change a flag on a resumed run.** Rerunning the identical command continues it; a
+   changed command applies new decision rules on top of generations decided under the old ones.
+   Start fresh `--runs/--skills/--rulebooks` trees instead.
 4. **Never point two runs at one `--runs` tree**, and never run two agent-spawning `acumen`
    commands at once — they share your rate limit.
 5. **Never touch answers or ground-truth scripts** to make a number move, and never paste hold-out
