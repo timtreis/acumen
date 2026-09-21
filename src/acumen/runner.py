@@ -13,9 +13,9 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
 
 from acumen.env import AuthMode, Target, sdk_version
 from acumen.grade import Grade, Reason, grade_run
@@ -48,6 +48,48 @@ class RunOutcome:
     success: bool
     reason: Reason
     payload: dict
+
+
+#: Substrings of an agent error that mark it as the platform's problem, not the run's: the
+#: subscription session/usage limit, API rate limiting, overload, or the machine losing the network.
+#: Matched case-insensitively. A dropped connection is as transient as a rate limit and just as
+#: silent: an overnight round-2 draft recorded 14 ENOTFOUND runs as task failures, which put that
+#: arm 9 tasks below its siblings and made a fine skill look like a bad one.
+_TRANSIENT_MARKERS = (
+    "session limit",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "overloaded",
+    " 429",
+    " 529",
+    "enotfound",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "eai_again",
+    "socket hang up",
+    "can't reach the api server",
+    "connection error",
+    " 502",
+    " 503",
+    " 504",
+)
+
+
+def is_transient(error: str) -> bool:
+    """Whether an agent error is a transient platform failure that a later retry would not hit."""
+    lower = f" {error.lower()}"
+    return any(marker in lower for marker in _TRANSIENT_MARKERS)
+
+
+class TransientLimitError(RuntimeError):
+    """A pass stopped because the platform refused runs (session/usage/rate limit).
+
+    Raised by :func:`acumen.bench.run_matrix` after the pass has wound down, so a caller (the CLI, the
+    loop) stops instead of proceeding on a partial matrix. Nothing was recorded for the refused runs;
+    rerunning resumes exactly there.
+    """
 
 
 def _terminal_reason(message: ResultMessage) -> Reason | None:
@@ -153,6 +195,56 @@ class StderrFilter:
         print(line, file=self._sink, flush=True)
 
 
+#: Tool names that hand work to an out-of-band worker and then wait for a notification — which a
+#: one-shot benchmark ``query()`` never delivers. Denied outright in the sandbox (see below).
+_BACKGROUND_TOOLS = frozenset({"Monitor"})
+
+
+def find_background_use(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """Return why a tool call would defer work to the background, or ``None`` if it runs inline.
+
+    A benchmark run is a single, non-interactive ``query()``. If the agent launches a command with
+    ``run_in_background`` (or reaches for a monitor tool) and ends its turn to await a completion
+    notification, that notification never arrives — the run strands and writes no ``answer.md``,
+    scoring a spurious failure that reflects job-scheduling, not the skill. Observed on the first
+    real loop run against squidpy. Pure and side-effect free, so it can be exercised without an
+    agent (mirrors :func:`acumen.improve.find_test_access`).
+    """
+    if tool_input.get("run_in_background") is True:
+        return "run_in_background"
+    if tool_name in _BACKGROUND_TOOLS:
+        return tool_name
+    return None
+
+
+def make_sync_guard() -> HookMatcher:
+    """Build the ``PreToolUse`` hook that forces every benchmark tool call to run inline.
+
+    Structural, not just prompt-level: even if the agent tries to background a slow command, the
+    call is denied with a reason telling it to run synchronously. ``matcher=None`` fires for every
+    tool. The guard is identical in both arms, so baseline parity is preserved — it changes how a
+    run behaves, never how the two arms differ.
+    """
+
+    async def guard(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        hit = find_background_use(input_data.get("tool_name", ""), input_data.get("tool_input", {}) or {})
+        if hit is None:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    f"This is a one-shot benchmark run — there is no notification channel, so a "
+                    f"backgrounded task ({hit}) would strand the run. Execute the command "
+                    "synchronously (do not set run_in_background) and wait for it inline."
+                ),
+            }
+        }
+
+    return HookMatcher(matcher=None, hooks=[guard])
+
+
 def _build_options(
     *,
     box: Sandbox,
@@ -188,6 +280,9 @@ def _build_options(
         setting_sources=["project"],
         permission_mode="bypassPermissions",
         system_prompt={"type": "preset", "preset": "claude_code"},
+        # Deny backgrounding so a slow command can never strand the one-shot run waiting on a
+        # notification that never comes. Identical in both arms, so baseline parity holds.
+        hooks={"PreToolUse": [make_sync_guard()]},
         stderr=stderr,
     )
 
@@ -208,6 +303,7 @@ async def run_once(
     keep_sandbox: bool = False,
     stderr: Callable[[str], None] | None = None,
     env_passthrough: Sequence[str] | None = None,
+    dataset_cache_dirs: Sequence[str] | None = None,
 ) -> RunOutcome:
     """Execute one benchmark run end to end and write its ``result.json``.
 
@@ -245,6 +341,9 @@ async def run_once(
     env_passthrough
         Extra environment variable names to carry into the sandbox on top of the built-in
         allowlist (the operator's ``config.env_passthrough``).
+    dataset_cache_dirs
+        cwd-relative dataset directories to symlink to the target's shared dataset cache
+        (``config.dataset_cache_dirs``), identically in both arms.
 
     Returns
     -------
@@ -257,6 +356,11 @@ async def run_once(
             f"arm {key.arm!r} expects skill {key.skill!r} but was given {skill.version if skill else None!r}"
         )
     run_dir.mkdir(parents=True, exist_ok=True)
+    # A re-run (a stale draft's result, --no-resume) must not inherit the previous run's artifacts:
+    # grading reads answer.md and skill-loading reads the transcript, and both are only rewritten
+    # if this run gets far enough to produce them.
+    for name in (RESULT_FILE, ANSWER_FILE, SCRIPT_FILE, TRANSCRIPT_JSONL, TRANSCRIPT_HTML):
+        (run_dir / name).unlink(missing_ok=True)
     split = task.split(key.split)
 
     result: ResultMessage | None = None
@@ -269,6 +373,7 @@ async def run_once(
         keep=keep_sandbox,
         skill=skill,
         env_passthrough=env_passthrough,
+        dataset_cache_dirs=dataset_cache_dirs,
     ) as box:
         prompt = benchmark_prompt(
             split.prompt,
@@ -297,6 +402,20 @@ async def run_once(
         rendered = render_transcript(run_dir / TRANSCRIPT_JSONL, run_dir / TRANSCRIPT_HTML)
         if expected_skill is not None:
             skill_loaded = _skill_fired(run_dir / TRANSCRIPT_JSONL, expected_skill)
+
+    # A transient platform failure (subscription session limit, rate limit, overload) says nothing
+    # about the task or the skill. Recording it as a completed failed run would (a) let resume skip
+    # it forever and (b) feed it to the improver as evidence — the first live CV loop wrote 54 such
+    # "failures" in minutes when the session limit hit mid-bench. So: no result.json, and the
+    # outcome is flagged so the matrix stops launching runs into the same wall.
+    transient_msg = error or ((result.errors and " ".join(map(str, result.errors))) if result else None)
+    if transient_msg and is_transient(str(transient_msg)):
+        return RunOutcome(
+            key=key,
+            success=False,
+            reason="error",
+            payload={"transient": True, "error": str(transient_msg)[:300], "task_id": key.task_id},
+        )
 
     grade: Grade = grade_run(run_dir, split.answer)
     if error is not None or result is None:
@@ -329,6 +448,9 @@ async def run_once(
         "pkg_version": target.fingerprint,
         "commit": target.commit,
         "skill_hash": skill.hash if skill else None,
+        # Bytes of skill content the agent had available; 0 for the baseline. The report's
+        # leanness axis — recorded per run so it is tied to the exact skill that ran.
+        "skill_bytes": skill.size if skill else 0,
         "skill_name": skill.name if skill else None,
         # Evidence, not configuration: did the agent actually invoke the Skill tool?
         "skill_loaded": skill_loaded,

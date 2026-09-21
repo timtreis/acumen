@@ -6,6 +6,7 @@ broke, not an exhaustive sweep of each validator.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -26,6 +28,7 @@ from acumen.env import (
     AUTH_ENV_VARS,
     EnvError,
     Target,
+    _clone,
     api_auth_available,
     auth_available,
     build_agent_env,
@@ -36,7 +39,18 @@ from acumen.env import (
 )
 from acumen.grade import grade_answer, grade_run
 from acumen.improve import _write_material, collect_train_runs, load_rates
-from acumen.paths import RunKey, arm_name, is_complete, parse_run_dir, run_dir
+from acumen.paths import (
+    ANSWER_FILE,
+    RESULT_FILE,
+    SCRIPT_FILE,
+    TRANSCRIPT_HTML,
+    TRANSCRIPT_JSONL,
+    RunKey,
+    arm_name,
+    is_complete,
+    parse_run_dir,
+    run_dir,
+)
 from acumen.procs import label_env, reap, supported, survivors
 from acumen.prompts import draft_prompt, feedback_block, improve_prompt
 from acumen.report import (
@@ -58,10 +72,10 @@ from acumen.report import (
     skill_tests,
     tradeoff_figure,
 )
-from acumen.runner import StderrFilter, _skill_fired
+from acumen.runner import StderrFilter, _skill_fired, find_background_use
 from acumen.ship import _ship_env
 from acumen.skills import SkillError, load_skill, read_meta, skill_hash, write_meta
-from acumen.tasks import TaskError, load_tasks, parse_tasks
+from acumen.tasks import Task, TaskError, TaskSplit, load_tasks, parse_tasks
 
 # --- grading ---------------------------------------------------------------------------
 
@@ -88,6 +102,18 @@ def test_grade_run_reads_answer_md(tmp_path: Path) -> None:
 
 
 # --- run paths -------------------------------------------------------------------------
+
+
+def test_find_background_use_flags_only_deferred_work() -> None:
+    # A normal synchronous Bash call is fine.
+    assert find_background_use("Bash", {"command": "python script.py"}) is None
+    assert find_background_use("Bash", {"command": "ls", "run_in_background": False}) is None
+    # Backgrounding a command would strand a one-shot run.
+    assert find_background_use("Bash", {"command": "python slow.py", "run_in_background": True}) == "run_in_background"
+    # A monitor-style tool waits on notifications that never arrive.
+    assert find_background_use("Monitor", {"command": "tail -f log"}) == "Monitor"
+    # Unrelated tools pass through.
+    assert find_background_use("Read", {"file_path": "answer.md"}) is None
 
 
 def test_run_dir_round_trips(tmp_path: Path) -> None:
@@ -125,6 +151,61 @@ def test_config_defaults_and_derived_skill_name() -> None:
 
     cfg2 = parse_config({"repo": "https://github.com/scverse/scanpy", "env_passthrough": ["OMP_NUM_THREADS"]})
     assert cfg2.env_passthrough == ["OMP_NUM_THREADS"]
+
+
+def test_config_submodules_defaults_on_and_must_be_a_bool() -> None:
+    assert parse_config({"repo": "https://github.com/scverse/squidpy"}).submodules is True
+    assert parse_config({"repo": "https://github.com/scverse/squidpy", "submodules": False}).submodules is False
+    with pytest.raises(ConfigError, match="must be true or false"):
+        parse_config({"repo": "https://github.com/scverse/squidpy", "submodules": "yes"})
+
+
+def test_clone_checks_out_submodules_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The real work is a network clone, so assert on the git commands issued: a declared
+    # submodule must be initialised after the ref checkout, and skipped when opted out.
+    calls: list[list[str]] = []
+    dest = tmp_path / "src"
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> str:
+        calls.append(cmd)
+        if cmd[:2] == ["git", "clone"]:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".gitmodules").write_text('[submodule "docs/notebooks"]\n')
+        return ""
+
+    monkeypatch.setattr("acumen.env._run", fake_run)
+
+    _clone("https://example.com/pkg", "main", dest)
+    assert [c for c in calls if c[:2] == ["git", "submodule"]] == [
+        ["git", "submodule", "update", "--init", "--recursive", "--quiet"]
+    ]
+    # ...and it runs after the checkout, so submodules land on the commit the ref pins.
+    assert calls.index(["git", "submodule", "update", "--init", "--recursive", "--quiet"]) > next(
+        i for i, c in enumerate(calls) if "checkout" in c
+    )
+
+    calls.clear()
+    _clone("https://example.com/pkg", "main", dest, submodules=False)
+    assert not [c for c in calls if c[:2] == ["git", "submodule"]]
+
+
+def test_clone_reports_a_submodule_that_cannot_be_checked_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A declared-but-unfetchable submodule leaves an empty directory an agent would read as
+    # "this package has no tutorials", so it must fail loudly rather than silently.
+    dest = tmp_path / "src"
+
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> str:
+        if cmd[:2] == ["git", "clone"]:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".gitmodules").write_text('[submodule "docs/notebooks"]\n')
+        if cmd[:2] == ["git", "submodule"]:
+            raise EnvError("fatal: could not read Username")
+        return ""
+
+    monkeypatch.setattr("acumen.env._run", fake_run)
+
+    with pytest.raises(EnvError, match="submodules: false"):
+        _clone("https://example.com/pkg", "main", dest)
 
 
 def test_config_rejects_unknown_keys() -> None:
@@ -167,8 +248,8 @@ def test_build_matrix_and_resume(project: Path, model: str, make_result) -> None
 
     runs = project / "runs"
     make_result(runs, RunKey(arm="skill_v1", split="train", model=model, task_id="example_task", rep=1))
-    assert [p.key.split for p in pending(planned, runs)] == ["test"]
-    assert len(pending(planned, runs, resume=False)) == 2
+    assert [p.key.split for p in pending(planned, runs, skill_hash=None)] == ["test"]
+    assert len(pending(planned, runs, skill_hash=None, resume=False)) == 2
 
 
 def test_skill_fired_matches_the_skill_under_test_only(tmp_path: Path) -> None:
@@ -412,46 +493,31 @@ def test_session_and_api_availability(tmp_path: Path, monkeypatch: pytest.Monkey
     assert session_auth_available() is True
 
 
-def test_resolve_auth_mode_for_meta_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_auth_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_auth(monkeypatch, tmp_path)
 
     # No credentials at all → auto cannot resolve.
     with pytest.raises(EnvError, match="no Claude credentials"):
-        resolve_auth_mode("auto", allow_session=True)
+        resolve_auth_mode("auto")
 
     # auto prefers the subscription when a login exists.
     _write_oauth_credentials(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert resolve_auth_mode("auto", allow_session=True) == "session"
+    assert resolve_auth_mode("auto") == "session"
 
     # auto falls back to the API when there is no subscription.
     (tmp_path / ".credentials.json").unlink()
-    assert resolve_auth_mode("auto", allow_session=True) == "api"
+    assert resolve_auth_mode("auto") == "api"
 
     # Forcing a mode requires that mode's credential.
-    assert resolve_auth_mode("api", allow_session=True) == "api"
+    assert resolve_auth_mode("api") == "api"
     with pytest.raises(EnvError, match="--auth session"):
-        resolve_auth_mode("session", allow_session=True)
+        resolve_auth_mode("session")
     _write_oauth_credentials(tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert resolve_auth_mode("session", allow_session=True) == "session"
+    assert resolve_auth_mode("session") == "session"
     with pytest.raises(EnvError, match="--auth api"):
-        resolve_auth_mode("api", allow_session=True)
-
-
-def test_resolve_auth_mode_for_bench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_auth(monkeypatch, tmp_path)
-
-    # bench never bills the subscription, even when only a subscription is available.
-    _write_oauth_credentials(tmp_path)
-    with pytest.raises(EnvError, match="session is not available for it"):
-        resolve_auth_mode("session", allow_session=False)
-    with pytest.raises(EnvError, match="must bill the API"):
-        resolve_auth_mode("api", allow_session=False)
-
-    # With an API credential, bench resolves to api.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert resolve_auth_mode("api", allow_session=False) == "api"
+        resolve_auth_mode("api")
 
 
 def test_scrubbed_env_auth_mode_filters_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -676,14 +742,14 @@ def test_load_warning_needs_most_of_the_arm_to_miss(
     assert bool(notes) is warned
 
 
-# --- the cost/success trade-off figure --------------------------------------------------
+# --- the size/success trade-off figure --------------------------------------------------
 
 #: The two markers matplotlib gives an error bar's caps; neither is a data point.
 _CAP_MARKERS = {"|", "_"}
 
 
 def _pooled_marks(figure: plt.Figure) -> list[tuple[float, float]]:
-    """``(cost, rate)`` of each pooled mark, in the order the arms are drawn.
+    """``(size, rate)`` of each pooled mark, in the order the arms are drawn.
 
     The pooled marks are the only ones carrying error bars, so they are exactly the axes'
     error-bar containers.
@@ -714,9 +780,9 @@ def test_tradeoff_pooled_mark_averages_runs_not_per_model_means(runs_root: Path,
     """
     other = "claude-opus-5"
     key = RunKey(arm="noskill", split="test", model=other, task_id="example_task", rep=1)
-    make_result(runs_root, key, success=False, cost_usd=0.30)
-    make_result(runs_root, replace(key, rep=2), success=False, cost_usd=0.30)
-    df = load_results(runs_root)  # the fixture's one passing $0.12 run, plus two failing $0.30 ones
+    make_result(runs_root, key, success=False)
+    make_result(runs_root, replace(key, rep=2), success=False)
+    df = load_results(runs_root)  # the fixture's one passing run, plus two failing ones
 
     figure = tradeoff_figure(df)
     try:
@@ -724,9 +790,9 @@ def test_tradeoff_pooled_mark_averages_runs_not_per_model_means(runs_root: Path,
     finally:
         plt.close(figure)
 
-    # Over runs: ($0.12 + $0.30 + $0.30)/3 and 1 of 3 passing. Over per-model means it would
-    # have been $0.21 and 50%.
-    assert pooled == pytest.approx((0.24, 1 / 3))
+    # Over runs: 1 of 3 passing, at the baseline's size of 0. Over per-model means it would
+    # have been 50%.
+    assert pooled == pytest.approx((0.0, 1 / 3))
 
 
 def test_tradeoff_shape_carries_the_arm_and_colour_carries_the_model(runs_root: Path, model: str, make_result) -> None:
@@ -748,21 +814,24 @@ def test_tradeoff_shape_carries_the_arm_and_colour_carries_the_model(runs_root: 
 
 
 def test_tradeoff_frontier_steps_between_the_marks_nothing_beats(runs_root: Path, model: str, make_result) -> None:
-    """The staircase holds each rate until the next frontier point's price, then steps up.
+    """The staircase holds each rate until the next frontier point's size, then steps up.
 
-    A dominated arm — dearer *and* worse — must leave no trace on the line, and the path must
+    A dominated arm — bigger *and* worse — must leave no trace on the line, and the path must
     never cut a diagonal between two points, which would claim a result nobody measured.
     """
     other = "claude-opus-5"
-    # Cheap and good, dear and bad, dear and best: only the first and last are non-dominated.
-    make_result(runs_root, RunKey(arm="skill_v1", split="test", model=other, task_id="example_task", rep=1))
+    # A 1 KB skill that passes and a 5 KB one that fails, beside the fixture's passing baseline
+    # (size 0): the baseline alone is non-dominated, both skills are bigger and no better.
+    make_result(
+        runs_root, RunKey(arm="skill_v1", split="test", model=other, task_id="example_task", rep=1), skill_bytes=1024
+    )
     make_result(
         runs_root,
         RunKey(arm="skill_v2", split="test", model=other, task_id="example_task", rep=1),
-        cost_usd=0.50,
+        skill_bytes=5120,
         success=False,
     )
-    df = load_results(runs_root)  # plus the fixture's $0.12 passing baseline run
+    df = load_results(runs_root)  # plus the fixture's passing baseline run at size 0
 
     figure = tradeoff_figure(df)
     try:
@@ -771,9 +840,9 @@ def test_tradeoff_frontier_steps_between_the_marks_nothing_beats(runs_root: Path
     finally:
         plt.close(figure)
 
-    # Both $0.12 runs pass, so the cheapest 100% mark alone survives; the $0.50 failure is
-    # dominated and the riser starts at the axis floor.
-    assert vertices == [(pytest.approx(0.12), pytest.approx(y_min)), (pytest.approx(0.12), pytest.approx(1.0))]
+    # The size-0 100% mark alone survives; the bigger marks are dominated and the riser starts
+    # at the axis floor.
+    assert vertices == [(pytest.approx(0.0), pytest.approx(y_min)), (pytest.approx(0.0), pytest.approx(1.0))]
 
 
 def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model: str, make_result) -> None:
@@ -787,7 +856,7 @@ def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model:
 
     figure = tradeoff_figure(df)
     try:
-        assert _pooled_marks(figure) == [(pytest.approx(0.12), 0.0)]
+        assert _pooled_marks(figure) == [(pytest.approx(0.0), 0.0)]
         assert _frontier(figure)  # degenerate but drawn, rather than crashing on the empty case
     finally:
         plt.close(figure)
@@ -795,10 +864,12 @@ def test_tradeoff_handles_an_arm_where_nothing_succeeded(runs_root: Path, model:
 
 def test_tradeoff_plots_the_test_split_only(runs_root: Path, model: str, make_result) -> None:
     """Train runs feed the improver; a report measures held-out performance and must not mix them."""
+    # A huge skill benched on the train split only: if train leaked in, a second pooled mark
+    # would appear far to the right.
     make_result(
         runs_root,
-        RunKey(arm="noskill", split="train", model=model, task_id="example_task", rep=2),
-        cost_usd=99.0,
+        RunKey(arm="skill_v1", split="train", model=model, task_id="example_task", rep=1),
+        skill_bytes=99_999,
     )
     df = load_results(runs_root)
 
@@ -808,11 +879,11 @@ def test_tradeoff_plots_the_test_split_only(runs_root: Path, model: str, make_re
     finally:
         plt.close(figure)
 
-    assert pooled == pytest.approx((0.12, 1.0))  # the fixture's test run alone
+    assert pooled == pytest.approx((0.0, 1.0))  # the fixture's baseline test run alone
 
 
 def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model: str, make_result) -> None:
-    """The cost label at the origin is centred on the corner the rate floor label also sits on.
+    """The size label at the origin is centred on the corner the rate floor label also sits on.
 
     Left to itself that puts half of one under the other, which is unreadable exactly where the
     reader looks to learn the rate axis is truncated.
@@ -831,7 +902,7 @@ def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model:
         # The locators run past the view, so the corner pair are the innermost *visible* labels.
         x_lo, x_hi = ax.get_xlim()
         y_lo, y_hi = ax.get_ylim()
-        cost = min(
+        size = min(
             (t for t in ax.get_xticklabels() if x_lo <= t.get_position()[0] <= x_hi),
             key=lambda t: t.get_position()[0],
         )
@@ -840,7 +911,7 @@ def test_tradeoff_keeps_the_two_corner_tick_labels_apart(runs_root: Path, model:
             key=lambda t: t.get_position()[1],
         )
         renderer = figure.canvas.get_renderer()
-        overlaps = cost.get_window_extent(renderer).overlaps(rate.get_window_extent(renderer))
+        overlaps = size.get_window_extent(renderer).overlaps(rate.get_window_extent(renderer))
     finally:
         plt.close(figure)
 
@@ -903,64 +974,74 @@ def test_pareto_steps_never_cuts_a_diagonal() -> None:
 _TASKS = ("alpha", "beta", "gamma", "delta", "epsilon")
 
 
-def _arena(runs_root: Path, model: str, make_result, spec: dict[str, tuple[float, list[bool]]]) -> pd.DataFrame:
-    """A run tree of ``arm -> (cost per run, one success flag per task)``, one rep each."""
-    for arm, (cost, outcomes) in spec.items():
+def _arena(runs_root: Path, model: str, make_result, spec: dict[str, tuple[int, list[bool]]]) -> pd.DataFrame:
+    """A run tree of ``arm -> (skill size in bytes, one success flag per task)``, one rep each."""
+    for arm, (size, outcomes) in spec.items():
         for task, ok in zip(_TASKS, outcomes, strict=True):
             key = RunKey(arm=arm, split="test", model=model, task_id=task, rep=1)
-            make_result(runs_root, key, cost_usd=cost, success=ok)
+            make_result(runs_root, key, skill_bytes=size, success=ok)
     return load_results(runs_root)
 
 
-def test_cheaper_but_worse_does_not_dominate(runs_root: Path, model: str, make_result) -> None:
-    """The behaviour the whole design exists for: price cannot buy past a worse success rate.
+def test_size_buys_no_claim_and_a_bigger_worse_skill_is_off_the_frontier(
+    runs_root: Path, model: str, make_result
+) -> None:
+    """The claim tested is "better", full stop; size is the price shown beside it.
 
-    A single combined score would rank the cheap arm first — it is a fraction of the cost and only
-    slightly less accurate. Requiring *both* axes to improve refuses it, because the evidence for
-    dominance is only as strong as its weaker half.
+    A skill can never be leaner than no skill, so a joint "leaner and better" test would be vacuous.
+    Instead: the p-value is about rate alone, and the frontier share says whether the bytes were
+    justified — a bigger skill that is *worse* never holds the frontier, whatever its p.
     """
     df = _arena(
         runs_root,
         model,
         make_result,
         {
-            "noskill": (1.00, [True, True, False, False, False]),
-            "skill_v1": (0.10, [True, False, False, False, False]),  # far cheaper, strictly worse
-            "skill_v2": (0.10, [True, True, True, True, True]),  # cheaper and better everywhere
+            "noskill": (0, [True, True, False, False, False]),
+            "skill_v1": (4096, [True, False, False, False, False]),  # bigger, strictly worse
+            "skill_v2": (4096, [True, True, True, True, True]),  # same size, better everywhere
         },
     )
 
     tests = skill_tests(df, resamples=4000)
     by_arm = tests.comparisons.set_index("challenger")
+    frontier = tests.arms.set_index("arm")["frontier"]
 
-    # Overwhelming evidence on cost, none on rate -> the max is large and the claim fails.
-    assert by_arm.loc["skill_v1", "p_cost"] < 0.05
-    assert by_arm.loc["skill_v1", "p_rate"] > 0.5
-    assert by_arm.loc["skill_v1", "p"] == by_arm.loc["skill_v1", "p_rate"]
-    # Better on both axes, so the same rule passes it.
-    assert by_arm.loc["skill_v2", "p"] < 0.05
+    assert by_arm.loc["skill_v1", "p"] > 0.5  # no evidence it is better
+    assert by_arm.loc["skill_v2", "p"] < 0.05  # strong evidence it is
+    assert "p_cost" not in tests.comparisons.columns and "d_cost" not in tests.comparisons.columns
+    # v1 is dominated in every resample by the baseline (smaller, better). v2 pays 4 KB for a
+    # rate nothing smaller matches, so it holds the frontier in all but the rare draws made only
+    # of the two tasks the baseline also passes — there the smaller baseline ties it and wins.
+    # The baseline, at size 0, is never dominated.
+    assert frontier["skill_v1"] == 0.0
+    assert frontier["skill_v2"] > 0.95
+    assert frontier["noskill"] == 1.0
 
 
 def test_frontier_probability_agrees_with_the_plotted_frontier(runs_root: Path, model: str, make_result) -> None:
-    """An arm that dominates every resample is never off the frontier, and a dominated one never on."""
+    """An arm nothing smaller matches is never off the frontier; one a smaller arm beats never on."""
     df = _arena(
         runs_root,
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.10, [True, True, True, True, True]),  # cheaper and better, always
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (1024, [True, True, True, True, True]),  # bigger, but better every time
+            "skill_v2": (2048, [True, False, False, False, False]),  # bigger than v1 and worse
         },
     )
 
     tests = skill_tests(df, resamples=2000)
     frontier = tests.arms.set_index("arm")["frontier"]
-    observed = _pareto_front(list(zip(tests.arms["cost"], tests.arms["rate"], strict=True)))
+    observed = _pareto_front(list(zip(tests.arms["size"], tests.arms["rate"], strict=True)))
 
+    assert frontier["noskill"] == 1.0  # size 0: nothing is smaller, so never dominated
     assert frontier["skill_v1"] == 1.0
-    assert frontier["noskill"] == 0.0
-    # The column and the plot's staircase must pick out the same arm on the observed data.
-    assert observed == [(pytest.approx(0.10), pytest.approx(1.0))]
+    assert frontier["skill_v2"] == 0.0
+    # The column and the plot's staircase must pick out the same arms on the observed data
+    # (the baseline is 2/6: one pass here plus the fixture's passing example_task run).
+    assert observed == [(pytest.approx(0.0), pytest.approx(1 / 3)), (pytest.approx(1024.0), pytest.approx(1.0))]
 
 
 def test_skill_tests_compares_every_version_with_the_baseline_only(runs_root: Path, model: str, make_result) -> None:
@@ -974,9 +1055,9 @@ def test_skill_tests_compares_every_version_with_the_baseline_only(runs_root: Pa
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.50, [True, True, False, False, False]),
-            "skill_v2": (0.10, [True, True, True, True, True]),
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (2048, [True, True, False, False, False]),
+            "skill_v2": (1024, [True, True, True, True, True]),
         },
     )
 
@@ -1017,7 +1098,7 @@ def test_holm_is_monotone_and_scales_by_remaining_tests(raw: list[float], expect
 def test_best_cells_follows_each_column_own_direction(
     values: list[float | None], highest: bool, expected: set[int]
 ) -> None:
-    """Best means highest for the rates and lowest for cost and p, so the caller states which."""
+    """Best means highest for the rates and lowest for size and p, so the caller states which."""
     assert _best_cells(values, highest=highest) == expected
 
 
@@ -1028,18 +1109,18 @@ def test_tests_table_bolds_the_winner_in_each_column(runs_root: Path, model: str
         model,
         make_result,
         {
-            "noskill": (1.00, [True, False, False, False, False]),
-            "skill_v1": (0.10, [True, True, True, True, True]),
+            "noskill": (0, [True, False, False, False, False]),
+            "skill_v1": (1024, [True, True, True, True, True]),
         },
     )
 
     html = _tests_table_html(skill_tests(df, resamples=2000))
 
     assert "<strong>100.0%</strong>" in html  # highest success rate wins its column
-    assert "<strong>$0.100</strong>" in html  # *lowest* cost wins its own
-    assert "<strong>$1.000</strong>" not in html
+    assert "<strong>0 B</strong>" in html  # *smallest* size wins its own
+    assert "<strong>1.0 KB</strong>" not in html
     # The comparison columns sit under one header, so it is clear they all refer to the baseline.
-    assert 'colspan="4">Compared with No skill' in html
+    assert 'colspan="3">Compared with No skill' in html
 
 
 def test_skill_tests_is_deterministic(runs_root: Path, model: str, make_result) -> None:
@@ -1076,15 +1157,19 @@ def test_skill_tests_declines_to_test_too_few_tasks(runs_root: Path, model: str,
 
 def test_skill_tests_uses_the_test_split_only(runs_root: Path, model: str, make_result) -> None:
     """Train runs feed the improver, so letting them into the test would be marking its own work."""
-    spec = {"noskill": (1.00, [True, False, True, False, False]), "skill_v1": (0.20, [True, True, True, True, False])}
+    spec = {"noskill": (0, [True, False, True, False, False]), "skill_v1": (2048, [True, True, True, True, False])}
     before = skill_tests(_arena(runs_root, model, make_result, spec), resamples=2000)
 
-    for task in _TASKS:  # a pile of cheap, always-passing train runs for the baseline
-        make_result(runs_root, RunKey(arm="noskill", split="train", model=model, task_id=task, rep=9), cost_usd=0.001)
+    for task in _TASKS:  # a pile of always-passing train runs, each claiming an absurd skill size
+        make_result(
+            runs_root,
+            RunKey(arm="skill_v1", split="train", model=model, task_id=task, rep=9),
+            skill_bytes=99_999,
+        )
     after = skill_tests(load_results(runs_root), resamples=2000)
 
     assert after.comparisons["p"].tolist() == before.comparisons["p"].tolist()
-    assert after.arms["cost"].tolist() == before.arms["cost"].tolist()
+    assert after.arms["size"].tolist() == before.arms["size"].tolist()
 
 
 def test_arm_marker_widens_with_the_version() -> None:
@@ -1250,3 +1335,78 @@ def test_label_env_marks_a_run_without_disturbing_the_rest(tmp_path: Path) -> No
 
     assert marked.items() >= base.items()
     assert str(holder) in marked.values()
+
+
+def test_scrubbed_env_keeps_long_bash_commands_inline(tmp_path: Path) -> None:
+    """The CLI backgrounds a Bash call that outlives its timeout, which strands a one-shot agent.
+
+    Every isolated agent therefore gets a long Bash timeout (default and ceiling) so a real analysis
+    step runs inline — the sync guard cannot catch the harness doing this on its own.
+    """
+    from acumen.env import BASH_TIMEOUT_MS
+
+    env = scrubbed_env(config_dir=tmp_path / "cfg", home=tmp_path / "home")
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == str(BASH_TIMEOUT_MS) == env["BASH_MAX_TIMEOUT_MS"]
+    assert BASH_TIMEOUT_MS >= 30 * 60 * 1000
+
+
+def test_resume_reruns_a_skill_run_recorded_by_a_different_draft(project: Path, model: str, make_result) -> None:
+    """Resume is by path, and the path names a version, not a draft — so the hash has to decide.
+
+    A tree whose skill_v1/ holds another v1 draft's results (a re-drafted skill, a sanity run that
+    shared the tree) must re-run them, not score this draft with that draft's evidence.
+    """
+    cfg = load_config(project / "config.yaml")
+    tasks = load_tasks(project / "tasks.yaml")
+    planned = build_matrix(cfg, tasks, skill="v1", splits=["test"])
+    runs = project / "runs"
+    key = planned[0].key
+    make_result(runs, key)
+    result = run_dir(runs, key) / RESULT_FILE
+
+    def record(skill_hash) -> None:
+        payload = json.loads(result.read_text())
+        payload["skill_hash"] = skill_hash
+        result.write_text(json.dumps(payload))
+
+    record("sha256:this-draft")
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == []  # same skill: reused
+    assert pending(planned, runs, skill_hash="sha256:other-draft") == planned  # different draft: re-run
+
+    record(None)  # a result from before hashes were recorded cannot vouch for any skill
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == planned
+
+    result.write_text("{not json")  # unreadable: re-run rather than trust it
+    assert pending(planned, runs, skill_hash="sha256:this-draft") == planned
+    assert pending(planned, runs, skill_hash=None) == []  # no-skill arm: presence is enough
+
+
+def test_a_rerun_starts_without_the_previous_runs_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grading reads answer.md and load detection reads the transcript; a re-run that dies before
+    rewriting them must not be graded on the previous draft's answer."""
+    from acumen import runner as runner_mod
+
+    directory = tmp_path / "rep_1"
+    directory.mkdir()
+    stale = [RESULT_FILE, ANSWER_FILE, SCRIPT_FILE, TRANSCRIPT_JSONL, TRANSCRIPT_HTML]
+    for name in stale:
+        (directory / name).write_text("from the previous draft")
+
+    def dead_sandbox(*_, **__):
+        raise RuntimeError("sandbox never opened")
+
+    monkeypatch.setattr(runner_mod, "sandbox", dead_sandbox)
+    split = TaskSplit(prompt="p", answer="42")
+    with pytest.raises(RuntimeError, match="sandbox never opened"):
+        asyncio.run(
+            runner_mod.run_once(
+                key=RunKey(arm="noskill", split="test", model="m", task_id="t", rep=1),
+                task=Task(id="t", train=split, test=split),
+                target=SimpleNamespace(),
+                run_dir=directory,
+                model="m",
+                max_turns=1,
+                max_usd=1.0,
+            )
+        )
+    assert [name for name in stale if (directory / name).exists()] == []

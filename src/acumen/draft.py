@@ -30,6 +30,7 @@ from acumen.skills import (
     SkillError,
     load_skill,
     next_version,
+    normalize_frontmatter,
     skill_dir,
     write_meta,
 )
@@ -57,6 +58,13 @@ def _validate_staged(staging: Path, skill_name: str) -> None:
         raise DraftError(
             f"the drafting agent did not write {SKILL_FILE} — nothing to promote. Inspect the run log or the prompt."
         )
+    # A description with an unquoted colon is the agent's content, not a defect: quote it so the
+    # frontmatter parses, rather than fail the run (which a fold draft did, mid-loop).
+    skill_md = staging / SKILL_FILE
+    text = skill_md.read_text()
+    normalized = normalize_frontmatter(text)
+    if normalized != text:
+        skill_md.write_text(normalized)
     # load_skill enforces the frontmatter contract (name matches, description present).
     try:
         load_skill(staging.parent, staging.name, expect_name=skill_name)
@@ -75,6 +83,7 @@ async def draft_skill(
     max_usd: float | None = None,
     rationale: str = "initial draft",
     feedback: str | None = None,
+    rulebook: str | None = None,
     log: LiveLog | None = None,
 ) -> DraftResult:
     """Draft a new skill version from the target package's source.
@@ -101,6 +110,10 @@ async def draft_skill(
     feedback
         Optional maintainer guidance, injected into the draft prompt as a subordinated block
         and recorded in ``meta.json`` as provenance.
+    rulebook
+        The draft-instruction template (a rulebook version's text) to draft from. ``None`` uses the
+        built-in :data:`acumen.prompts.DRAFT_PROMPT`, so a plain ``acumen draft`` is unchanged; the
+        rulebook loop passes a versioned template so the skill is drafted from the rulebook on trial.
     log
         A :class:`LiveLog` to stream the agent's messages to and render an HTML log from.
 
@@ -143,6 +156,7 @@ async def draft_skill(
             out=staging,
             skill_name=cfg.skill_name,
             feedback=feedback,
+            template=rulebook,
         )
         options = ClaudeAgentOptions(
             cwd=str(work),

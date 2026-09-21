@@ -62,6 +62,10 @@ ENV_ALLOWLIST = (
 
 _BASE_PATH = ("/usr/local/bin", "/usr/bin", "/bin")
 
+#: Bash timeout handed to every isolated agent (default and ceiling), in ms — 45 minutes. Long
+#: enough for a heavy analysis step to run inline; see :func:`scrubbed_env` for why that matters.
+BASH_TIMEOUT_MS = 45 * 60 * 1000
+
 
 class EnvError(RuntimeError):
     """Raised when the target cannot be prepared."""
@@ -94,6 +98,17 @@ class Target:
         """The ``pkg_version`` string recorded in ``result.json``, e.g. ``numpy 2.1.0``."""
         return f"{self.pkg_name} {self.pkg_version}"
 
+    @property
+    def datasets_dir(self) -> Path:
+        """The persistent, shared dataset cache for this target: ``<cache entry>/datasets``.
+
+        Sandboxes symlink their ``config.dataset_cache_dirs`` here (see
+        :func:`acumen.sandbox.link_dataset_cache`) and ``acumen warm`` pre-populates it, so a
+        dataset is downloaded once per target rather than once per run. Lives beside the venv,
+        so it shares the venv's (repo, ref) cache key and is dropped with it on ``--refresh-target``.
+        """
+        return self.venv_dir.parent / "datasets"
+
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> str:
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -109,12 +124,33 @@ def cache_key(repo: str, ref: str) -> str:
     return f"{stem}-{digest}"
 
 
-def _clone(repo: str, ref: str, dest: Path) -> None:
+def _clone(repo: str, ref: str, dest: Path, *, submodules: bool = True) -> None:
+    """Clone ``repo`` at ``ref`` into ``dest``, optionally checking out its submodules.
+
+    Submodules are initialised *after* the ref checkout, so each one lands on the commit
+    that ref pins rather than whatever the default branch points at.
+
+    A package's tutorials are routinely a submodule, and the drafting and task-generation
+    agents read those docs as their primary evidence. Skipping them leaves an empty
+    directory that an agent cannot distinguish from a package with no tutorials, so a
+    submodule that is declared but cannot be fetched is a hard error rather than a silent
+    gap — set ``submodules: false`` in ``config.yaml`` to opt out deliberately.
+    """
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     _run(["git", "clone", "--filter=blob:none", "--quiet", repo, str(dest)])
     _run(["git", "-c", "advice.detachedHead=false", "checkout", "--quiet", ref], cwd=dest)
+    if not submodules or not (dest / ".gitmodules").is_file():
+        return
+    try:
+        _run(["git", "submodule", "update", "--init", "--recursive", "--quiet"], cwd=dest)
+    except EnvError as err:
+        raise EnvError(
+            f"{repo}@{ref} declares submodules that could not be checked out: {err}\n"
+            "The docs an agent reads may live in one of them. Fix access to the submodule, "
+            "or set 'submodules: false' in config.yaml to proceed without them."
+        ) from err
 
 
 def _resolve_commit(src_dir: Path) -> str:
@@ -152,9 +188,12 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
     Parameters
     ----------
     cfg
-        The pass config; supplies ``repo``, ``ref``, ``extras`` and ``python``.
+        The pass config; supplies ``repo``, ``ref``, ``extras``, ``python`` and
+        ``submodules``.
     cache_root
-        Directory to hold checkouts and venvs, keyed by (repo, ref).
+        Directory to hold checkouts and venvs, keyed by (repo, ref). ``submodules`` is
+        recorded in the ready marker rather than folded into the key, so flipping it
+        rebuilds the entry in place instead of stranding the old one.
     refresh
         Rebuild even if a ready-marked cache entry exists.
 
@@ -191,11 +230,15 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
             target = None  # a corrupt marker just means we rebuild
         else:
             # A local target's working tree can move under us; a clone at a pinned ref cannot.
-            if target.python.is_file() and (not cfg.is_local or _resolve_commit(src_dir) == target.commit):
+            # `submodules` is part of what the checkout *is*, so a cache entry built under a
+            # different setting is stale — otherwise flipping it on would silently keep
+            # serving the submodule-less tree it was first built with.
+            fresh = cached.get("submodules") == cfg.submodules
+            if fresh and target.python.is_file() and (not cfg.is_local or _resolve_commit(src_dir) == target.commit):
                 return target
 
     if not cfg.is_local:
-        _clone(cfg.repo, cfg.ref, src_dir)
+        _clone(cfg.repo, cfg.ref, src_dir, submodules=cfg.submodules)
 
     entry.mkdir(parents=True, exist_ok=True)
     if venv_dir.exists():
@@ -225,6 +268,7 @@ def prepare_target(cfg: Config, cache_root: Path, *, refresh: bool = False) -> T
                 "commit": target.commit,
                 "pkg_name": target.pkg_name,
                 "pkg_version": target.pkg_version,
+                "submodules": cfg.submodules,
             },
             indent=2,
         )
@@ -346,42 +390,25 @@ def api_auth_available() -> bool:
     return any(os.environ.get(var) for var in API_AUTH_ENV_VARS)
 
 
-def resolve_auth_mode(requested: str, *, allow_session: bool) -> AuthMode:
+def resolve_auth_mode(requested: str) -> AuthMode:
     """Resolve a requested auth choice to the concrete mode a run will use, or fail loudly.
 
-    A preflight guard that replaces :func:`check_auth` on the agentic commands: it both
-    validates that the chosen credential is actually reachable and reports which mode the
-    run will bill, so the choice is never silent.
+    A preflight guard for every agentic command (``bench`` included): it both validates that the
+    chosen credential is actually reachable and reports which mode the run will bill, so the choice
+    is never silent. Every command may run on the subscription — ``bench`` used to be barred from it
+    to keep its recorded ``cost_usd`` real, but cost is not a metric acumen optimizes, so that
+    restriction is gone; a subscription ``bench`` simply records no meaningful per-run cost.
 
     Parameters
     ----------
     requested
         The user's choice: ``"auto"`` (prefer the subscription, else the API), ``"session"``
         (force the subscription), or ``"api"`` (force the API).
-    allow_session
-        Whether the subscription is a permitted mode. ``bench`` passes ``False`` because it
-        records real per-run ``cost_usd``, which only means anything under metered API
-        billing — so bench always resolves to ``"api"`` and rejects ``"session"``.
 
     Returns
     -------
     ``"session"`` or ``"api"``.
     """
-    if not allow_session:
-        if requested == "session":
-            raise EnvError(
-                "bench records real per-run cost and must bill the API, so --auth session is "
-                "not available for it — the Claude subscription does not meter per-run spend. "
-                "Run the single-agent commands (draft/improve/tasks/ship) on the session instead."
-            )
-        if not api_auth_available():
-            raise EnvError(
-                "no API credential found — bench must bill the API. Set ANTHROPIC_API_KEY (or "
-                "ANTHROPIC_AUTH_TOKEN), or enable a provider with CLAUDE_CODE_USE_BEDROCK / "
-                "CLAUDE_CODE_USE_VERTEX."
-            )
-        return "api"
-
     if requested == "session":
         if not session_auth_available():
             raise EnvError(
@@ -535,6 +562,14 @@ def scrubbed_env(
     env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     env["TMPDIR"] = str(home / "tmp")
     env["LANG"] = os.environ.get("LANG", "C.UTF-8")
+    # The CLI moves a Bash command that outlives its timeout (2 min by default) to the background
+    # and tells the agent to await a completion notification — which, in a one-shot query, never
+    # comes: the agent "pauses" and the run ends with nothing written. The PreToolUse sync guard
+    # cannot see this (no flag is set on the call), so the fix is upstream: give every isolated
+    # agent a Bash timeout long enough that a real analysis (segmentation, permutation tests)
+    # finishes inline. Identical in both arms, so parity holds.
+    env["BASH_DEFAULT_TIMEOUT_MS"] = str(BASH_TIMEOUT_MS)
+    env["BASH_MAX_TIMEOUT_MS"] = str(BASH_TIMEOUT_MS)
     # Keep pip/uv from reaching into the real user's caches and configs.
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_CACHE_HOME"] = str(home / ".cache")

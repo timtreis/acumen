@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from acumen.config import Config
 from acumen.env import AuthMode, Target
-from acumen.paths import SPLITS, RunKey, Split, arm_name, is_complete, run_dir
-from acumen.runner import RunOutcome, run_once
+from acumen.paths import RESULT_FILE, SPLITS, RunKey, Split, arm_name, is_complete, run_dir
+from acumen.runner import RunOutcome, TransientLimitError, run_once
 from acumen.skills import Skill
 from acumen.tasks import Task
 
@@ -92,11 +93,32 @@ def build_matrix(
     return planned
 
 
-def pending(planned: Sequence[PlannedRun], runs_root: Path, *, resume: bool = True) -> list[PlannedRun]:
-    """Drop runs that already have a complete ``result.json``."""
+def pending(
+    planned: Sequence[PlannedRun], runs_root: Path, *, skill_hash: str | None, resume: bool = True
+) -> list[PlannedRun]:
+    """Drop runs already complete — for a skill arm, complete *with this skill*.
+
+    Resume is by path, and the path names a version, not a draft: ``skill_v1/`` in one run tree can
+    hold results from a different ``v1`` than the one being benched now (a re-drafted skill, a
+    sanity run that shared the tree). Reusing those silently scores one draft with another's runs.
+    So a skill run counts as done only when its ``result.json`` records ``skill_hash``; anything
+    else is re-run. ``skill_hash`` is required so a caller cannot skip the check by omission —
+    pass ``None`` for the no-skill arm, which has no skill to mismatch.
+    """
     if not resume:
         return list(planned)
-    return [p for p in planned if not is_complete(run_dir(runs_root, p.key))]
+    return [p for p in planned if not _done(run_dir(runs_root, p.key), skill_hash)]
+
+
+def _done(directory: Path, skill_hash: str | None) -> bool:
+    if not is_complete(directory):
+        return False
+    if skill_hash is None:
+        return True
+    try:
+        return json.loads((directory / RESULT_FILE).read_text()).get("skill_hash") == skill_hash
+    except (OSError, ValueError):
+        return False  # unreadable: re-run rather than trust it
 
 
 async def run_matrix(
@@ -114,6 +136,7 @@ async def run_matrix(
     on_start: Callable[[PlannedRun], None] | None = None,
     on_done: Callable[[RunOutcome], None] | None = None,
     env_passthrough: Sequence[str] | None = None,
+    dataset_cache_dirs: Sequence[str] | None = None,
 ) -> list[RunOutcome]:
     """Run planned runs concurrently, bounded by ``max_concurrency``.
 
@@ -157,6 +180,9 @@ async def run_matrix(
     env_passthrough
         Extra environment variable names each run carries into its sandbox on top of the
         built-in allowlist (the operator's ``config.env_passthrough``).
+    dataset_cache_dirs
+        cwd-relative dataset directories each sandbox symlinks to the target's shared dataset
+        cache (``config.dataset_cache_dirs``).
 
     Returns
     -------
@@ -164,9 +190,16 @@ async def run_matrix(
     """
     semaphore = asyncio.Semaphore(max_concurrency)
     outcomes: list[RunOutcome] = []
+    # Set by the first transient (limit) failure: every run still queued is then skipped instead of
+    # being thrown at the same wall, and the pass ends by raising so nobody scores a partial matrix.
+    paused: list[str] = []
 
     async def one(item: PlannedRun) -> RunOutcome:
         async with semaphore:
+            if paused:
+                return RunOutcome(
+                    key=item.key, success=False, reason="error", payload={"transient": True, "skipped": paused[0]}
+                )
             if on_start is not None:
                 on_start(item)
             outcome = await run_once(
@@ -184,13 +217,22 @@ async def run_matrix(
                 keep_sandbox=keep_sandbox,
                 stderr=stderr,
                 env_passthrough=env_passthrough,
+                dataset_cache_dirs=dataset_cache_dirs,
             )
+            if outcome.payload.get("transient") and not paused:
+                paused.append(str(outcome.payload.get("error", "transient platform error")))
             if on_done is not None:
                 on_done(outcome)
             return outcome
 
     for coro in asyncio.as_completed([one(item) for item in planned]):
         outcomes.append(await coro)
+    if paused:
+        refused = sum(1 for o in outcomes if o.payload.get("transient"))
+        raise TransientLimitError(
+            f"the platform refused runs ({paused[0][:160]}); {refused} of {len(planned)} runs were not "
+            "recorded — rerun the same command to resume them once the limit resets"
+        )
     return outcomes
 
 

@@ -1,0 +1,19 @@
+# squidpy rulebook-loop workspace (collaborator copy — see RUNBOOK.md)
+repo: https://github.com/scverse/squidpy
+ref: main
+skill_name: squidpy
+submodules: true
+# Reference/bench model: sonnet — haiku never loads skills (LOAD 0/N), which neutralises the mechanism;
+# sonnet loads them, so headroom must come from genuinely hard tasks instead (see acumen screen / --headroom).
+models: [claude-sonnet-5]
+# Authoring stays on the stronger model: good skills and good rulebook edits.
+draft_model: claude-sonnet-5
+improve_model: claude-sonnet-5
+tasks_model: claude-sonnet-5
+n_replicates: 1
+# 2 was a subscription-window constraint, not a real one. On API credit raise this as far
+# as your rate limit allows — it is the single biggest wall-clock lever in the whole pipeline.
+max_concurrency: 16
+
+# P3: squidpy downloads to cwd-relative data/ (scanpy datasetdir) and cache/; share them across runs.
+dataset_cache_dirs: [data, cache]

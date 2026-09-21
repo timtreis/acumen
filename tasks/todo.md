@@ -1,0 +1,85 @@
+# acumen — rulebook autoresearch loop TODO
+
+Goal: a continuous loop that optimizes a versioned **rulebook** (the instructions that generate
+`SKILL.md`) for **squidpy**, scored on held-out tasks under CV, stratified by difficulty, over tasks
+that exhaustively cover the package. Rulebook = the optimized artifact; skills = intermediates.
+Binding constraints: wall-clock and selection leakage (NOT dollar cost). Full design: `diary.md`;
+build plan + decisions: `tasks/build-plan.md`.
+
+## Built (all seven modules of the build plan, 2026-08-26/27) — see diary for each
+
+- [x] **P0** submodules · **P1** sharded task-gen (proven live) · **P2** coverage (`acumen coverage`,
+      persisted ground-truth scripts; proven live) · **P3** warm dataset cache (`acumen warm`; proven
+      live) · **P4** per-model difficulty strata + `loop --headroom` (proven on real runs) ·
+      **P6** content-hashed/immutable/provenanced rulebook · **leanness = skill size** in the report
+      (proven on real runs) · **mining** (`acumen mine`, `tasks --candidates`; proven live: 281
+      candidates, mined→task→script chain) · **P5** CV folds + write-once lockbox + hold-out guard ·
+      **P7** `run_loop` with stopping rules, CV pick, one-shot lockbox verdict (`loop --cv`).
+- [x] Reliable bench (sync-guard), bench on subscription, PASS + LOAD loop metrics. 190 tests.
+
+## Done 2026-08-27/28 — the first honest measurement
+
+- [x] Corpus: 80/80 mined shards → 177 tasks; merged → `tasks_all.yaml` **181 tasks**, coverage 26/99.
+- [x] Lockbox written once (36 tasks); working set 145. Bench model switched to sonnet.
+- [x] Baseline `bench --no-skill --split test`: sonnet 117/145; **28 hard** tasks (headroom).
+- [x] First live `loop --cv 3 --iterations 3 --patience 2 --headroom`: v1→v2 CV +3.7%, v2→v3 +7.4%
+      (tie on absolute rate), v3→v4 **−14.4%**; pick **v2**; **LOCKBOX v1 26/36 → v2 27/36 (+3%)**.
+      Four session-limit pauses, all clean (0 bogus results) after the transient-limit fix.
+- [x] Bugs found live and fixed: task-gen stall (sync guard), limit-as-failure (pause + raise),
+      diff-inside-version-dir (hash tamper false positive).
+
+## Round 2 (2026-08-29/30) — done
+
+- [x] Phase 3: 50 notebooks → 83 tasks; working set 228; coverage 30/99; skill coverage 24 → 28 verified.
+- [x] Round 2 loop (fresh roots seeded from r1 pick): iter CVs +4.4% / −13.3% / +11.1%; pick **r2-v4**;
+      LOCKBOX r2-v1 22/36 → r2-v4 29/36 (+8/−1); vs round-1 best 27 → 29.
+- [x] **Finding: draft variance.** Same rulebook text, two drafts: 9/36 lockbox tasks differ (27 vs 22).
+- [x] Fixes found live: task-gen pause, 45-min Bash timeout (harness backgrounding), frontmatter
+      normalization, transient draft failures as pauses.
+
+## Next  — detailed playbook: `tasks/next-session.md`
+- [x] **Score a rulebook over N drafts** (2026-08-31): `loop --cv K --drafts N` scores the lockbox
+      verdict as mean ± spread over N independent drafts per version (`DraftScores`,
+      `lockbox_mean_delta`). Extra drafts at `skills/drafts/vK/d<i>/`, benches at
+      `runs/drafts/vK/d<i>/lockbox/`, drafts tree denied to improve agents; primary paths unchanged
+      so finished runs resume. Staged: CV folds (the pick) stay single-draft. 204 tests.
+- [ ] **Variance experiment (B)**: rerun the finished round-2 loop command with `--drafts 3` — resume
+      reuses everything; only the 4 new drafts bench on the lockbox (~216 runs ≈ 4 h ≈ one session
+      window). Decides whether round 3 is warranted. **Needs the user's go.**
+- [ ] Fix the stale `paused` retry ergonomics: `run_round2.sh`'s blind 30-min retry misses resets that
+      fall past its last attempt; parse the `resets HH:MM` from the CLI message instead.
+
+- [x] Improve-step evidence → reshaped into **`acumen evolve`** (2026-08-31, user steer: hundreds of
+      generations of wild edits, reliably measured): improve-from-best always, 8 rotating exploration
+      directives, cheap rotating 12-task screens (accept ≥ +2), full-bench ratchet every 5 accepts
+      with revert, `runs/evolve.jsonl` decision archive, deterministic resume, lockbox once at end
+      over `--drafts` (default 3). `src/acumen/evolve.py` + CLI + 6 tests. Not yet run live.
+- [x] **Islands + cross-pollination** (2026-08-31): `evolve --islands K` — k independent evolutions
+      on disjoint `make_folds` partitions (own trees, main run tree denied, lockbox never opened),
+      then the `pollinate` meta-agent merges edits that replicated across ≥2 islands into meta-rules
+      (rationale = the meta-rule list; surviving-edit diffs via `_champion_chain`); validation =
+      full working test split, then lockbox over `--drafts`. 212 tests. Not yet run live.
+- [ ] **First live evolve run** (after the variance experiment reports): calibrate `--accept-delta`
+      from the measured draft spread, then `acumen evolve --islands 3 --generations 10 --headroom`
+      in a fresh workspace root. One fleet/loop/evolve at a time (shared session window).
+- [ ] Targeted coverage backfill: `coverage --queue` → `tasks --feedback` naming the 21 taught-but-
+      unverified symbols (mostly `calculate_niche*`, loaders); remaining 201 mined candidates.
+- [ ] Report the lockbox Δ on its hard subset (14 tasks noskill fails) beside the full 36.
+- [x] Lockbox floor benched once: noskill 22/36.
+- [ ] Never run task-gen fleets and the loop concurrently (shared session window).
+
+## Later / open
+
+- [ ] Task-gen answer defensibility (reject QC-artifact groups, near-ties) — the mined prompt helped;
+      still no structural check.
+- [ ] Between-version dominance in the report (does v3 dominate v2: no bigger AND better).
+- [ ] Remaining mined candidates; web-leg URLs (`mine --url`) for tutorials outside GitHub.
+- [ ] `tasks --max-concurrency` flag (fleet concurrency is config-only today).
+
+## Notes
+
+- Workspace `~/acumen-squidpy/` (config with `dataset_cache_dirs: [data, cache]`, `mined/`,
+  `mined_top/`, `tasks_*.yaml`, `scripts/`, `logs_mined/`). Auth: `CLAUDE_CODE_OAUTH_TOKEN` from
+  `.token`; `--auth session`; wrap long runs in `caffeinate -i`. See the `squidpy-loop-workspace` memory.
+- Lint: `uvx ruff@0.16.1 check src tests` / `format --check`; never commit a reformat of
+  `src/acumen/_skills/data/references/python-api.md`.

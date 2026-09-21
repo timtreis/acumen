@@ -79,6 +79,34 @@ def install_skill(root: Path, skill: Skill) -> Path:
     return dest
 
 
+def link_dataset_cache(root: Path, shared_root: Path, names: Sequence[str]) -> list[Path]:
+    """Symlink each cwd-relative dataset dir in a sandbox to its persistent shared counterpart.
+
+    The target package downloads example data to directories relative to the agent's working
+    directory (squidpy's ``data`` via ``scanpy.settings.datasetdir``), i.e. into the throwaway
+    sandbox — so every run re-downloads. Pointing ``<root>/<name>`` at ``<shared_root>/<name>``
+    makes the download land in (and be served from) one persistent place per target.
+
+    This is a *filesystem* redirect of acumen-owned paths, not an environment change: the env
+    scrub, throwaway ``HOME``/``XDG_*`` and the user's real caches are untouched. It applies to
+    both arms identically, so baseline parity holds. The shared directory is a read-only input
+    in intent (datasets), though nothing stops an agent writing there — acceptable, since
+    ``result.json``/answers never live under it.
+
+    Returns
+    -------
+    The symlinks created, ``<root>/<name>`` for each name.
+    """
+    links: list[Path] = []
+    for name in names:
+        shared = shared_root / name
+        shared.mkdir(parents=True, exist_ok=True)
+        link = root / name
+        link.symlink_to(shared, target_is_directory=True)
+        links.append(link)
+    return links
+
+
 @contextmanager
 def sandbox(
     target: Target,
@@ -88,6 +116,7 @@ def sandbox(
     keep: bool = False,
     skill: Skill | None = None,
     env_passthrough: Sequence[str] | None = None,
+    dataset_cache_dirs: Sequence[str] | None = None,
 ) -> Iterator[Sandbox]:
     """Create a fresh sandbox for one run and clean it up afterwards.
 
@@ -107,6 +136,10 @@ def sandbox(
     env_passthrough
         Extra environment variable names to carry into the sandbox on top of the built-in
         allowlist (the operator's ``config.env_passthrough``).
+    dataset_cache_dirs
+        cwd-relative directory names to symlink to the target's shared dataset cache
+        (``config.dataset_cache_dirs``; see :func:`link_dataset_cache`). ``None``/empty links
+        nothing.
 
     Yields
     ------
@@ -123,6 +156,8 @@ def sandbox(
             path.mkdir(parents=True, exist_ok=True)
         if skill is not None:
             install_skill(root, skill)
+        if dataset_cache_dirs:
+            link_dataset_cache(root, target.datasets_dir, dataset_cache_dirs)
         # The marker is what lets the teardown below find whatever this agent leaves running.
         env = label_env(
             build_agent_env(

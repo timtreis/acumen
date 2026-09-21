@@ -32,3 +32,11 @@ report.html
 report.csv
 
 *ipynb*
+
+# acumen writes a live run log per command into ./logs by default
+logs/
+
+# Experiment data is recorded verbatim, filenames included: mined candidates and ground-truth
+# scripts named after someone's .ipynb_checkpoints must not fall to the *ipynb* rule above.
+!experiments/*/scripts/*.py
+!experiments/*/mined*/*.py
