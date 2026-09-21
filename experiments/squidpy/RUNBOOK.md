@@ -30,21 +30,23 @@ Two facts to carry through everything below:
 | `tasks_working.yaml` | 228 tasks with ground-truth answers. The training/selection pool. |
 | `lockbox/` | 36 held-out tasks + digest manifest. **Already opened 9 times** — see Stage 2. |
 | `scripts/` | 260 executable ground-truth scripts, one per task, that produce the expected answers. |
-| `mined/` | 282 candidate analyses mined from squidpy's notebooks. **~200 never turned into tasks.** |
-| `rulebook/champion.md` | The best rulebook we found (r2-v4), with its rationale in `champion-meta.json`. |
+| `mined/` | The 200 mined candidate analyses that were **never turned into tasks** — Stage 1's input. |
+| `mined_used/` | The 81 that were, kept for provenance. `mined/index.json` records every origin URL. |
+| `rulebooks/v1/` | The best rulebook we found (r2-v4), pre-seeded as the chain's `v1` so `evolve` and every island start from it. Its rationale traces the lineage. |
 | `results/lockbox_matrix.csv` | Per-task pass/fail for all 9 arms we benched. Our numbers, auditable. |
 | `analyze.py` | Turns run trees into a verdict: draft means, paired sign tests, hard/easy split. |
+| `status.py` | One-screen health check for a running experiment. Exit 1 when something needs a human. |
+| `AGENTS.md` | Operating rules for an agent running this unattended: launching, monitoring, when to stop. |
 
 ---
 
 ## Setup
 
 ```bash
-git clone https://github.com/timtreis/acumen && cd acumen
-git checkout claude/acumen-overview-c410ls
-uv sync                                   # or: pip install -e .
-export ANTHROPIC_API_KEY=...              # then pass --auth api to every command below
+git clone --branch claude/acumen-overview-c410ls https://github.com/timtreis/acumen ~/acumen
+cd ~/acumen && uv sync && source .venv/bin/activate    # puts `acumen` on PATH
 cp -R experiments/squidpy ~/squidpy-exp && cd ~/squidpy-exp
+export ANTHROPIC_API_KEY=...                           # then pass --auth api to every command below
 ```
 
 **Use `--auth api`, not a subscription.** Everything in this experiment that went wrong
@@ -63,8 +65,9 @@ python analyze.py --self-check
 
 ## Stage 1 — grow the benchmark (do this first)
 
-36 held-out tasks cannot resolve a 5-task effect. ~200 mined candidates were never turned into
-tasks; turning them into a second, larger, **never-opened** hold-out is the highest-value thing
+36 held-out tasks cannot resolve a 5-task effect. The 200 candidates in `mined/` were never turned
+into tasks, and none shares a source notebook with an existing task — so a hold-out carved from them
+is clean. Turning them into a second, larger, **never-opened** hold-out is the highest-value thing
 compute can buy here.
 
 ```bash
@@ -110,78 +113,88 @@ should now be treated as a validation set, not a clean hold-out.
 
 ## Stage 2 — re-establish the floor, over drafts
 
+**Every command from here on uses the one run tree `runs/`.** `evolve --headroom` reads the
+no-skill floor from its own `--runs` root; a floor benched anywhere else is invisible to it.
+
 ```bash
-acumen warm  --config config.yaml --tasks tasks_pool.yaml                       # pre-download datasets once
+acumen warm  --config config.yaml --tasks tasks_pool.yaml          # pre-download datasets once
 acumen bench --config config.yaml --tasks tasks_pool.yaml --runs runs \
-  --no-skill --split test --auth api                                            # the floor; also feeds --headroom
+  --no-skill --split test --auth api                               # the floor; feeds --headroom
 ```
 
-Then score the champion rulebook we are handing you, as a mean over ≥3 drafts, on the *working*
-pool only. This is the number Stage 3 has to beat, and it is the first honest baseline this
-experiment has had.
+Then score the champion we are handing you as a mean over 3 drafts, on the *working* pool only.
+This is the number Stage 3 has to beat, and the first honest baseline this experiment has had.
 
 ```bash
-acumen draft --config config.yaml --rulebook rulebook/champion.md --skills skills_d1 --auth api
-acumen draft --config config.yaml --rulebook rulebook/champion.md --skills skills_d2 --auth api
-acumen draft --config config.yaml --rulebook rulebook/champion.md --skills skills_d3 --auth api
 for d in 1 2 3; do
-  acumen bench --config config.yaml --tasks tasks_pool.yaml --runs runs_d$d \
-    --skill v1 --skills skills_d$d --split test --auth api
+  acumen draft --config config.yaml --rulebook rulebooks/v1/rulebook.md --skills champ_d$d --auth api
+  acumen bench --config config.yaml --tasks tasks_pool.yaml --runs runs_champ_d$d \
+    --skill v1 --skills champ_d$d --split test --auth api
 done
-python analyze.py noskill=runs/noskill champ.d1=runs_d1/skill_v1 \
-  champ.d2=runs_d2/skill_v1 champ.d3=runs_d3/skill_v1
+python analyze.py noskill=runs/noskill champ.d1=runs_champ_d1/skill_v1 \
+  champ.d2=runs_champ_d2/skill_v1 champ.d3=runs_champ_d3/skill_v1
 ```
 
-If the three drafts disagree by more than ~8pp, that is the expected draft noise and it sets
-`--accept-delta` for Stage 3. **Write the measured spread down — it is a result in itself.**
+The per-draft spread this prints sets `--accept-delta` for Stage 3: roughly half the spread in
+passes-per-screen, and never below 2. **Write the spread down — it is a result in itself.**
 
-## Stage 3 — evolve, for as many generations as you can afford
+## Stage 3 — evolve, and the verdict
 
 We ran 2 rounds of a 3-iteration loop. `evolve` is built for hundreds of generations and has never
-been run live.
+been run live. **First, a throwaway sanity run in its own trees, with the hold-out sealed:**
+
+```bash
+cp -R rulebooks rulebooks_sanity
+acumen evolve --config config.yaml --tasks tasks_pool.yaml \
+  --rulebooks rulebooks_sanity --skills skills_sanity --runs runs_sanity \
+  --generations 2 --screen-size 12 --screen-drafts 3 --accept-delta 2 \
+  --no-lockbox --auth api --log-dir logs_sanity
+```
+
+Check `runs_sanity/evolve.jsonl` has two lines whose screen `total` is 36 (12 tasks x 3 drafts),
+then delete every `*_sanity` tree. **Never point a second run at an existing `--runs` tree:** results
+are resumed by path, not by skill, so a run that finds `runs/skill_v1/` already populated reuses
+those results even if they came from a different draft.
+
+**Then the real run.** It evolves, merges the islands, validates the merge on the full working
+pool, and only then opens `lockbox2` — once — scoring the seed and the merged champion over 3
+drafts each:
 
 ```bash
 acumen evolve --config config.yaml --tasks tasks_pool.yaml \
-  --rulebooks rulebooks --skills skills --runs runs_evolve \
+  --rulebooks rulebooks --skills skills --runs runs \
   --islands 3 --generations 40 --headroom \
   --screen-size 24 --screen-drafts 3 --accept-delta <from stage 2> --confirm-every 3 \
-  --no-lockbox --auth api --log-dir logs_evolve
+  --lockbox lockbox2 --drafts 3 --auth api --log-dir logs_evolve
 ```
 
 - `--screen-drafts 3` is the flag this experiment's own findings paid for: each candidate is
   drafted three times and judged on the sum, so a generation is accepted for signal rather than
-  draft luck. `--accept-delta` still means *passes per draft*; the bar scales automatically. This
-  triples the drafting cost per generation and is the single best use of a large budget here.
-- `--islands 3` evolves three rulebooks independently on disjoint task partitions, then
-  cross-pollinates: only edits that replicated across ≥2 islands survive the merge. Replication
-  across islands is the evidence standard — it is what makes a rule a *finding* rather than a fit.
-- `--headroom` restricts evolution to tasks the bare model fails, so generations are not spent on
-  tasks with no room to improve.
+  draft luck. `--accept-delta` still means *passes per draft*; the bar scales automatically.
+- `--islands 3` evolves three rulebooks independently on disjoint task partitions, each starting
+  from `rulebooks/v1`, then cross-pollinates: only edits that replicated across ≥2 islands
+  survive the merge. Replication across islands is the evidence standard.
+- `--headroom` restricts evolution to tasks the bare model fails.
 - `--confirm-every 3` tightens the ratchet: a screen win only becomes a champion after a
-  full-benchmark confirmation, and a failed confirmation reverts. With compute to spare, confirm
-  more often than we could.
-- `--no-lockbox` keeps `lockbox2` sealed until Stage 4.
-- Resume is free and agent-free: rerun the identical command after any interruption.
+  full-benchmark confirmation, and a failed confirmation reverts.
+- Resume is free and agent-free: rerun the **identical** command after any interruption. Changing a
+  flag mid-run changes what is being measured — start fresh trees instead.
 
-`runs_evolve/evolve.jsonl` is one line per generation — directive, screen subset, scores, decision.
-That file is the dataset behind any claim about *what kind of edits* help, so keep it.
+Each island keeps one line per generation in `runs/islands/island-<i>/evolve.jsonl` — directive,
+screen subset, scores, decision. Those files are the dataset behind any claim about *what kind of
+edits* help, so keep them.
 
-**Sanity check before the long run.** Start with `--generations 2 --islands 1` and confirm the
-journal shows two generations with screens summed over three drafts (`total` = screen size x 3).
-Then relaunch with the real budget; resume reuses everything already on disk.
-
-## Stage 4 — the verdict, once
+When it finishes it prints `merged into vN`. Bench the bare model on the same hold-out, then run
+the verdict:
 
 ```bash
-acumen bench --config config.yaml --tasks lockbox2/tasks.yaml --runs runs_verdict/noskill \
+acumen bench --config config.yaml --tasks lockbox2/tasks.yaml --runs runs/lockbox \
   --no-skill --split test --auth api
-# then, for each of >=3 drafts of the merged champion and >=3 of the champion we gave you:
-acumen bench --config config.yaml --tasks lockbox2/tasks.yaml --runs runs_verdict/<label> \
-  --skill v1 --skills <draft skills root> --split test --auth api
-
-python analyze.py noskill=runs_verdict/noskill \
-  evolved.d1=... evolved.d2=... evolved.d3=... \
-  handed.d1=... handed.d2=... handed.d3=...
+python analyze.py noskill=runs/lockbox/noskill \
+  seed.d1=runs/lockbox/skill_v1 seed.d2=runs/drafts/v1/d2/lockbox/skill_v1 \
+  seed.d3=runs/drafts/v1/d3/lockbox/skill_v1 \
+  merged.d1=runs/lockbox/skill_vN merged.d2=runs/drafts/vN/d2/lockbox/skill_v1 \
+  merged.d3=runs/drafts/vN/d3/lockbox/skill_v1
 ```
 
 Report what `analyze.py` prints, including when it says *NOT distinguishable from noise*. A clean
@@ -192,22 +205,23 @@ under-powered one.
 
 ## What to send back
 
-1. `runs_evolve/evolve.jsonl` — the generation-by-generation decision archive.
-2. The final rulebooks: the merged champion plus each island's, with their `meta.json` rationales.
-3. `analyze.py` output for Stages 2 and 4, verbatim.
-4. `lockbox2/` (tasks + manifest) and the new `tasks_pool.yaml`, so the benchmark itself is shared.
-5. Anything that broke. Platform failures that get recorded as task failures are the failure mode
-   that has cost this experiment the most — one overnight network drop silently put an arm 9 tasks
-   below its siblings and made a perfectly good skill look bad.
+1. `runs/islands/island-*/evolve.jsonl` — the generation-by-generation decision archives.
+2. `rulebooks/` — the merged champion (its `meta.json` rationale is the meta-rule list) and each
+   island's chain under `rulebooks/islands/`.
+3. `analyze.py` output for Stage 2 and the verdict, verbatim.
+4. `lockbox2/` (tasks + manifest) and `tasks_pool.yaml`, so the benchmark itself is shared.
+5. Anything that broke. Platform failures recorded as task failures are the failure mode that has
+   cost this experiment the most — one overnight network drop silently put an arm 9 tasks below its
+   siblings and made a perfectly good skill look bad.
 
 ## Gotchas we paid for
 
 - **A dead run is not a failed task.** Session limits, rate limits, overload and network drops are
   now all treated as transient: no `result.json` is written and the pass stops (exit code 3) rather
-  than recording failures. Rerun to resume. If you see an arm that is inexplicably worse than its
-  siblings, grep its `result.json` files for `"reason": "error"` before believing it.
-- **Never run two agent fleets at once on one credential** — they contend, and on a subscription
-  they trip the same window.
+  than recording failures. Rerun to resume. `python status.py runs` flags any platform-killed run
+  that was recorded anyway; run it before believing an arm that is inexplicably worse than its
+  siblings.
+- **Never run two agent fleets at once on one credential** — they contend for the same rate limit.
 - **Agents are only as good as the ground truth.** Some task answers are genuinely ambiguous (a
   pair of cell-type names whose order is arbitrary). If a rulebook edit's rationale is "make the
   agent guess the ordering convention", that is the benchmark leaking, not a finding.

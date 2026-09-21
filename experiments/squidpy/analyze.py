@@ -18,7 +18,10 @@ Drafts of one rulebook share a label before a dot, and are pooled::
 
     python analyze.py noskill=runs/lb/noskill v7.d1=runs/lb/a v7.d2=runs/lb/b v7.d3=runs/lb/c
 
-Runs voided by a platform failure (`reason: error`) are excluded rather than counted as failures.
+Runs killed by a platform failure (network drop, rate limit, overload — anything
+`acumen.runner.is_transient` recognises) are excluded rather than counted as failures. Other
+errors — an agent hitting its turn cap, a tool output overflowing the SDK buffer — are genuine
+outcomes of the run and count as failures.
 """
 
 from __future__ import annotations
@@ -30,20 +33,24 @@ from collections import defaultdict
 from math import comb
 from pathlib import Path
 
+from acumen.runner import is_transient
+
 Outcomes = dict[str, bool | None]
 
 
 def read_arm(root: Path) -> Outcomes:
     """Every task's outcome under a run directory; ``None`` where the platform, not the task, failed."""
+    files = list(root.glob("*/*/*/rep_*/result.json")) or list(root.glob("*/*/rep_*/result.json"))
     out: Outcomes = {}
-    for f in root.glob("*/*/*/rep_*/result.json"):
+    for f in files:
         r = json.loads(f.read_text())
-        out[r["task_id"]] = None if r["reason"] == "error" else bool(r["success"])
-    if not out:  # a run tree one level shallower (bench --split test writes test/<model>/...)
-        for f in root.glob("*/*/rep_*/result.json"):
-            r = json.loads(f.read_text())
-            out[r["task_id"]] = None if r["reason"] == "error" else bool(r["success"])
+        out[r["task_id"]] = None if voided(r) else bool(r["success"])
     return out
+
+
+def voided(result: dict) -> bool:
+    """A run the platform killed says nothing about the task; one that failed on its own does."""
+    return result.get("reason") == "error" and is_transient(result.get("error") or "")
 
 
 def sign_test(base: Outcomes, arm: Outcomes) -> tuple[int, int, float, int]:
@@ -130,8 +137,12 @@ def _self_check() -> None:
     assert (gained, lost, n) == (5, 0, 10) and p < 0.07, (gained, lost, p, n)
     mixed = {**base, "t0": False, "t9": True}  # one lost, one gained -> pure noise
     assert sign_test(base, mixed)[2] == 1.0
-    voided = {**base, "t9": None}
-    assert sign_test(base, voided)[3] == 9
+    dropped = {**base, "t9": None}
+    assert sign_test(base, dropped)[3] == 9
+    net = "API Error: Can't reach the API server (ENOTFOUND)"
+    assert voided({"reason": "error", "error": net})
+    assert not voided({"reason": "error", "error": "Reached maximum number of turns (40)"})
+    assert not voided({"reason": "wrong_answer", "error": None})
     print("self-check ok")
 
 
